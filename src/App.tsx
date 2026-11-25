@@ -31,6 +31,7 @@ import type {
   ChatAttachment,
   ChatMessage,
   ConnectionConfig,
+  InteractiveCard,
   MeshFileItem,
   MeshNode,
   QuickMacro,
@@ -355,6 +356,12 @@ export default function App() {
   };
 
   const handleResolveApproval = (actionId: string, decision: 'approved' | 'rejected') => {
+    const action = messages
+      .flatMap((m) => m.cards ?? [])
+      .find(
+        (c): c is Extract<InteractiveCard, { type: 'approval' }> =>
+          c.type === 'approval' && c.data.id === actionId
+      );
     setMessages((prev) =>
       prev.map((m) => ({
         ...m,
@@ -376,6 +383,11 @@ export default function App() {
       }))
     );
     showToast(decision === 'approved' ? '已批准并通过 Tailscale 下发执行' : '已拒绝该操作');
+    if (decision === 'approved' && action) {
+      handleSendMessage(
+        `已批准执行：${action.data.targetDevice} · ${action.data.commandPreview}。请在云端确认并执行，完成后把结果告诉我。`
+      );
+    }
   };
 
   const handleUpdateNodeIp = (nodeId: string, newIp: string) => {

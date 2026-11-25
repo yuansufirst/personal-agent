@@ -32,12 +32,43 @@ const sessionCache = new Map<string, string>();
 // Remember which HTTP unary base path worked (`/api/remote/` vs `/api/`)
 const unaryPrefixCache = new Map<string, string>();
 
+const SESSION_STORE_PREFIX = 'relay.dsh.session.';
+
+function loadStoredSession(cacheKey: string): string {
+  try {
+    return window.localStorage.getItem(SESSION_STORE_PREFIX + cacheKey) || '';
+  } catch {
+    return '';
+  }
+}
+
+function storeSession(cacheKey: string, sessionId: string): void {
+  try {
+    window.localStorage.setItem(SESSION_STORE_PREFIX + cacheKey, sessionId);
+  } catch {
+    // ignore quota/private-mode errors
+  }
+}
+
 export function resetDshSession(config?: ConnectionConfig): void {
   if (!config) {
     sessionCache.clear();
+    try {
+      for (const key of Object.keys(window.localStorage)) {
+        if (key.startsWith(SESSION_STORE_PREFIX)) window.localStorage.removeItem(key);
+      }
+    } catch {
+      // ignore
+    }
     return;
   }
-  sessionCache.delete(`${config.serverUrl.trim()}::${config.workspace.trim()}`);
+  const cacheKey = `${config.serverUrl.trim()}::${config.workspace.trim()}`;
+  sessionCache.delete(cacheKey);
+  try {
+    window.localStorage.removeItem(SESSION_STORE_PREFIX + cacheKey);
+  } catch {
+    // ignore
+  }
 }
 
 export function buildDshWsUrl(serverUrl: string, wsEndpoint: string): string {
@@ -809,35 +840,42 @@ export function streamDshMuxReply(
 
       try {
         // Step 1: Ensure sessionId via HTTP POST unary carrier (NEVER through stream carrier)
-        let sessionId = config.sessionId?.trim() || sessionCache.get(cacheKey) || '';
+        let sessionId =
+          config.sessionId?.trim() || sessionCache.get(cacheKey) || loadStoredSession(cacheKey) || '';
 
         if (!sessionId) {
-          let createRes: unknown;
-          try {
-            createRes = await callDshHttpUnary(
-              config,
-              'session/create',
-              {
-                request: {
-                  workspaceId: config.workspace.trim() || undefined,
-                },
-              },
-              signal
-            );
-          } catch (createErr) {
-            const msg = createErr instanceof Error ? createErr.message : String(createErr);
-            if (msg.includes('unexpected "request"')) {
-              createRes = await callDshHttpUnary(
-                config,
-                'session/create',
-                {
-                  workspaceId: config.workspace.trim() || undefined,
-                },
-                signal
-              );
-            } else {
-              throw new Error(`创建会话 (HTTP POST session/create) 失败：${msg}`);
+          // Prefer the personal-assistant workspace (AGENTS.md persona/tools);
+          // fall back to the configured workspace id when cwd creation is refused.
+          const createRequests: Array<Record<string, unknown>> = [
+            { cwd: '/root/.dsh/im' },
+            { workspaceId: config.workspace.trim() || undefined },
+          ];
+          let createRes: unknown = null;
+          let lastErr = '';
+          for (const request of createRequests) {
+            try {
+              createRes = await callDshHttpUnary(config, 'session/create', { request }, signal);
+              if (findSessionIdInPayload(createRes)) break;
+            } catch (createErr) {
+              lastErr = createErr instanceof Error ? createErr.message : String(createErr);
+              const msg = lastErr;
+              if (msg.includes('unexpected "request"')) {
+                try {
+                  createRes = await callDshHttpUnary(
+                    config,
+                    'session/create',
+                    request,
+                    signal
+                  );
+                  if (findSessionIdInPayload(createRes)) break;
+                } catch (retryErr) {
+                  lastErr = retryErr instanceof Error ? retryErr.message : String(retryErr);
+                }
+              }
             }
+          }
+          if (!createRes && lastErr) {
+            throw new Error(`创建会话 (HTTP POST session/create) 失败：${lastErr}`);
           }
 
           sessionId = findSessionIdInPayload(createRes) || '';
@@ -847,6 +885,7 @@ export function streamDshMuxReply(
             );
           }
           sessionCache.set(cacheKey, sessionId);
+          storeSession(cacheKey, sessionId);
         }
 
         // Step 2: Subscribe to live output via stream carrier (`/api/remote.mux` -> `session/follow`)
