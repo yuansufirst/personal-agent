@@ -1,0 +1,6 @@
+{
+  "name": "Relay",
+  "description": "面向 Tailscale 个人设备网与 DeepSeek Harness 的高颜值移动端私人 Agent 交互中枢，集成交互卡片、每日新闻与论文简报、跨设备文件控制与日程提醒。",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
