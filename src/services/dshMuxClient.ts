@@ -1,4 +1,9 @@
-import type { ConnectionConfig } from '../types/relay';
+import type {
+  ChatAttachment,
+  ChatMessage,
+  ConnectionConfig,
+  RemoteSessionSummary,
+} from '../types/relay';
 import { extractRelayCards, type AgentReplyChunk } from './agentClient';
 
 /**
@@ -732,17 +737,434 @@ class SingleTurnMuxHelper {
   }
 }
 
+function formatShortTime(raw?: unknown): string {
+  if (typeof raw === 'number' || (typeof raw === 'string' && raw.trim())) {
+    const d = new Date(typeof raw === 'number' ? raw : raw);
+    if (!Number.isNaN(d.getTime())) {
+      const now = new Date();
+      const sameDay =
+        d.getFullYear() === now.getFullYear() &&
+        d.getMonth() === now.getMonth() &&
+        d.getDate() === now.getDate();
+      const hhmm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+      return sameDay ? hhmm : `${d.getMonth() + 1}/${d.getDate()} ${hhmm}`;
+    }
+  }
+  return '刚刚';
+}
+
+function collectSessionSummaries(node: unknown, out: Map<string, RemoteSessionSummary>, depth = 0): void {
+  if (!node || depth > 5) return;
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      collectSessionSummaries(item, out, depth + 1);
+    }
+    return;
+  }
+  if (typeof node !== 'object') return;
+  const obj = node as Record<string, unknown>;
+
+  const candidateId =
+    (typeof obj.sessionId === 'string' && obj.sessionId) ||
+    (typeof obj.id === 'string' &&
+      obj.id &&
+      (obj.workspaceId !== undefined ||
+        obj.cwd !== undefined ||
+        obj.title !== undefined ||
+        obj.updatedAt !== undefined ||
+        obj.createdAt !== undefined ||
+        obj.lastActiveAt !== undefined ||
+        obj.status !== undefined) &&
+      obj.id);
+
+  if (candidateId) {
+    const titleRaw =
+      (typeof obj.title === 'string' && obj.title.trim()) ||
+      (typeof obj.name === 'string' && obj.name.trim()) ||
+      (typeof obj.summary === 'string' && obj.summary.trim()) ||
+      (typeof obj.preview === 'string' && obj.preview.trim()) ||
+      `会话 ${candidateId.slice(0, 8)}`;
+    const ts = obj.updatedAt ?? obj.lastActiveAt ?? obj.lastMessageAt ?? obj.createdAt;
+    out.set(candidateId, {
+      sessionId: candidateId,
+      title: titleRaw.slice(0, 48),
+      updatedAt: formatShortTime(ts),
+      preview: typeof obj.preview === 'string' ? obj.preview : undefined,
+    });
+  }
+
+  for (const key of ['sessions', 'items', 'entries', 'list', 'data', 'snapshot', 'workspace', 'result', 'payload', 'value']) {
+    if (obj[key]) {
+      collectSessionSummaries(obj[key], out, depth + 1);
+    }
+  }
+}
+
+/**
+ * Fetches existing sessions from the DeepSeek Harness workspace.
+ * Tries HTTP unary `session/list` first, then falls back to WS `workspace/follow` initial snapshot.
+ */
+export async function listDshSessions(config: ConnectionConfig): Promise<RemoteSessionSummary[]> {
+  const workspaceId = config.workspace.trim() || undefined;
+  const found = new Map<string, RemoteSessionSummary>();
+
+  const listRequests: Array<Record<string, unknown>> = [
+    { cwd: '/root/.dsh/im' },
+    ...(workspaceId ? [{ workspaceId }] : []),
+    {},
+  ];
+
+  for (const endpoint of ['session/list', 'workspace/sessions']) {
+    for (const req of listRequests) {
+      try {
+        const res = await callDshHttpUnary(config, endpoint, { request: req });
+        collectSessionSummaries(res, found);
+        if (found.size > 0) return Array.from(found.values());
+      } catch {
+        // Try next candidate
+      }
+    }
+  }
+
+  const wsUrl = buildDshWsUrl(config.serverUrl, config.wsEndpoint);
+  if (!wsUrl) return [];
+
+  const wsCandidateArgs: Record<string, unknown>[] = [
+    ...(workspaceId ? [{ request: { address: { kind: 'workspace', workspaceId } } }] : []),
+    ...(workspaceId ? [{ request: { workspaceId } }] : []),
+    { request: {} },
+    {},
+  ];
+
+  for (const args of wsCandidateArgs) {
+    const items = await new Promise<RemoteSessionSummary[]>((resolve) => {
+      let done = false;
+      let ws: WebSocket | null = null;
+      const localMap = new Map<string, RemoteSessionSummary>();
+
+      const finish = () => {
+        if (done) return;
+        done = true;
+        window.clearTimeout(timer);
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+          try {
+            ws.close(1000, 'list-done');
+          } catch {
+            // ignore
+          }
+        }
+        resolve(Array.from(localMap.values()));
+      };
+
+      const timer = window.setTimeout(finish, 3500);
+
+      try {
+        ws = new WebSocket(wsUrl);
+      } catch {
+        finish();
+        return;
+      }
+
+      ws.onopen = () => {
+        if (!ws) return;
+        const mux = new SingleTurnMuxHelper(ws);
+        mux.openStream('workspace/follow', args, {
+          onItem: (item) => {
+            collectSessionSummaries(item, localMap);
+            if (localMap.size > 0) {
+              window.setTimeout(finish, 180);
+            }
+          },
+          onEnd: finish,
+          onError: finish,
+        });
+      };
+
+      ws.onerror = finish;
+      ws.onclose = finish;
+    });
+
+    if (items.length > 0) {
+      return items;
+    }
+  }
+
+  return Array.from(found.values());
+}
+
+function extractHistoryMessagesFromSnapshot(raw: unknown): ChatMessage[] {
+  const results: ChatMessage[] = [];
+  const seenKeys = new Set<string>();
+
+  const pushMsg = (role: 'user' | 'assistant', text: string, ts?: unknown, idx?: number) => {
+    const trimmed = text.trim();
+    if (!trimmed) return;
+    const dedup = `${role}:${trimmed.slice(0, 60)}:${idx ?? results.length}`;
+    if (seenKeys.has(dedup)) return;
+    seenKeys.add(dedup);
+    const parsed = role === 'assistant' ? extractRelayCards(trimmed) : { cleanText: trimmed, cards: [] };
+    results.push({
+      id: `hist-${role}-${results.length}-${Date.now().toString(36)}`,
+      role,
+      content: parsed.cleanText || trimmed,
+      cards: parsed.cards.length > 0 ? parsed.cards : undefined,
+      timestamp: formatShortTime(ts),
+    });
+  };
+
+  const walk = (node: unknown, depth = 0) => {
+    if (!node || depth > 6) return;
+    if (Array.isArray(node)) {
+      node.forEach((entry, i) => {
+        if (!entry || typeof entry !== 'object') return;
+        const obj = entry as Record<string, unknown>;
+        const dataObj = obj.data && typeof obj.data === 'object' ? (obj.data as Record<string, unknown>) : null;
+        const dataMessage =
+          dataObj?.message && typeof dataObj.message === 'object'
+            ? (dataObj.message as Record<string, unknown>)
+            : null;
+        const inner =
+          dataMessage ||
+          (obj.message && typeof obj.message === 'object' ? (obj.message as Record<string, unknown>) : null) ||
+          (obj.event && typeof obj.event === 'object' ? (obj.event as Record<string, unknown>) : null) ||
+          obj;
+        const type =
+          (typeof obj.type === 'string' && obj.type) ||
+          (typeof inner.type === 'string' && inner.type) ||
+          (typeof inner.kind === 'string' && inner.kind) ||
+          '';
+        const roleRaw =
+          (typeof inner.role === 'string' && inner.role) ||
+          (type.startsWith('user') ? 'user' : type.startsWith('assistant') ? 'assistant' : '');
+
+        if (roleRaw === 'user' || roleRaw === 'assistant') {
+          const text =
+            extractTextParts(inner.content) ||
+            (typeof inner.text === 'string' ? inner.text : '') ||
+            (dataObj ? extractTextParts(dataObj.content) : '') ||
+            extractTextParts(inner.parts);
+          pushMsg(roleRaw, text, inner.createdAt ?? inner.timestamp ?? obj.timestamp, i);
+          return;
+        }
+        walk(entry, depth + 1);
+      });
+      return;
+    }
+
+    if (typeof node !== 'object') return;
+    const obj = node as Record<string, unknown>;
+    for (const key of ['messages', 'entries', 'events', 'turns', 'history', 'items', 'snapshot', 'session', 'data', 'payload', 'value']) {
+      if (obj[key]) {
+        walk(obj[key], depth + 1);
+      }
+    }
+  };
+
+  walk(raw);
+  return results;
+}
+
+/**
+ * Loads historical messages for a specific remote sessionId by reading the initial
+ * `session/follow` snapshot (or HTTP `session/get` if available).
+ */
+export async function loadDshSessionHistory(
+  config: ConnectionConfig,
+  sessionId: string
+): Promise<ChatMessage[]> {
+  const cleanId = sessionId.trim();
+  if (!cleanId) return [];
+
+  const wsUrl = buildDshWsUrl(config.serverUrl, config.wsEndpoint);
+  if (wsUrl) {
+    const fromWs = await new Promise<ChatMessage[]>((resolve) => {
+      let done = false;
+      let ws: WebSocket | null = null;
+      let collected: ChatMessage[] = [];
+
+      const finish = () => {
+        if (done) return;
+        done = true;
+        window.clearTimeout(timer);
+        if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+          try {
+            ws.close(1000, 'history-loaded');
+          } catch {
+            // ignore
+          }
+        }
+        resolve(collected);
+      };
+
+      const timer = window.setTimeout(finish, 3200);
+
+      try {
+        ws = new WebSocket(wsUrl);
+      } catch {
+        finish();
+        return;
+      }
+
+      ws.onopen = () => {
+        if (!ws) return;
+        const mux = new SingleTurnMuxHelper(ws);
+        mux.openStream(
+          'session/follow',
+          {
+            request: {
+              address: {
+                kind: 'session',
+                sessionId: cleanId,
+              },
+              assistantStream: true,
+            },
+          },
+          {
+            onItem: (item) => {
+              const msgs = extractHistoryMessagesFromSnapshot(item);
+              if (msgs.length > 0) {
+                collected = msgs;
+                window.setTimeout(finish, 150);
+              }
+            },
+            onEnd: finish,
+            onError: finish,
+          }
+        );
+      };
+
+      ws.onerror = finish;
+      ws.onclose = finish;
+    });
+
+    if (fromWs.length > 0) return fromWs;
+  }
+
+  try {
+    const res = await callDshHttpUnary(config, 'session/get', {
+      request: { sessionId: cleanId },
+    });
+    return extractHistoryMessagesFromSnapshot(res);
+  } catch {
+    return [];
+  }
+}
+
+export interface StreamDshOptions {
+  attachments?: ChatAttachment[];
+  sessionIdOverride?: string;
+  onSessionResolved?: (sessionId: string) => void;
+}
+
+function buildTextWithFileAttachments(prompt: string, attachments?: ChatAttachment[]): string {
+  if (!attachments || attachments.length === 0) return prompt;
+  const textBlocks: string[] = [];
+  for (const att of attachments) {
+    if (att.textContent) {
+      textBlocks.push(
+        `[附件文件: ${att.name} (${att.size})]\n\`\`\`\n${att.textContent.slice(0, 60000)}\n\`\`\``
+      );
+    }
+  }
+  if (textBlocks.length === 0) return prompt;
+  return `${prompt}\n\n${textBlocks.join('\n\n')}`;
+}
+
+function buildMultimodalContentCandidates(
+  prompt: string,
+  attachments?: ChatAttachment[]
+): Record<string, unknown>[][] {
+  const combinedText = buildTextWithFileAttachments(prompt, attachments);
+  const mediaAttachments = (attachments || []).filter(
+    (att) => !att.textContent && (att.base64Data || att.dataUrl)
+  );
+
+  if (mediaAttachments.length === 0) {
+    return [[{ type: 'text', text: combinedText }]];
+  }
+
+  const makeParts = (
+    mapper: (att: ChatAttachment) => Record<string, unknown>
+  ): Record<string, unknown>[] => [
+    { type: 'text', text: combinedText },
+    ...mediaAttachments.map(mapper),
+  ];
+
+  return [
+    makeParts((att) =>
+      att.mimeType.startsWith('image/')
+        ? {
+            type: 'image',
+            mimeType: att.mimeType,
+            data: att.base64Data || att.dataUrl || '',
+          }
+        : {
+            type: 'file',
+            filename: att.name,
+            mimeType: att.mimeType,
+            data: att.base64Data || att.dataUrl || '',
+          }
+    ),
+    makeParts((att) =>
+      att.mimeType.startsWith('image/')
+        ? {
+            type: 'image',
+            mediaType: att.mimeType,
+            data: att.base64Data || att.dataUrl || '',
+          }
+        : {
+            type: 'file',
+            filename: att.name,
+            mediaType: att.mimeType,
+            data: att.base64Data || att.dataUrl || '',
+          }
+    ),
+    makeParts((att) =>
+      att.mimeType.startsWith('image/')
+        ? {
+            type: 'image',
+            url: att.dataUrl || '',
+            mimeType: att.mimeType,
+          }
+        : {
+            type: 'file',
+            filename: att.name,
+            url: att.dataUrl || '',
+            mediaType: att.mimeType,
+          }
+    ),
+    makeParts((att) => ({
+      type: 'image',
+      image: att.dataUrl || att.base64Data || '',
+      mimeType: att.mimeType,
+    })),
+    makeParts((att) => ({
+      type: 'image_url',
+      image_url: { url: att.dataUrl || '' },
+    })),
+    makeParts((att) => ({
+      type: 'image',
+      source: {
+        type: 'base64',
+        media_type: att.mimeType,
+        data: att.base64Data || '',
+      },
+    })),
+  ];
+}
+
 /**
  * Full DeepSeek Harness Typert Gateway conversation turn:
  * 1. Unary HTTP POST `session/create` (never via WS stream carrier) to obtain/reuse `sessionId`
- * 2. Stream WS `/api/remote.mux` `session/follow` to subscribe to real-time assistant chunks
- * 3. Unary HTTP POST `session/prompt` (with `args.request` and automatic content format adaptation)
+ * 2. Stream WS `/api/remote.mux` `session/follow` (`assistantStream: true`) to subscribe to live chunks
+ * 3. Unary HTTP POST `session/prompt` (with `args.request` and automatic multimodal adaptation)
  */
 export function streamDshMuxReply(
   prompt: string,
   config: ConnectionConfig,
   onChunk: (chunk: AgentReplyChunk) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: StreamDshOptions
 ): Promise<void> {
   const wsUrl = buildDshWsUrl(config.serverUrl, config.wsEndpoint);
   if (!wsUrl) {
@@ -840,8 +1262,10 @@ export function streamDshMuxReply(
 
       try {
         // Step 1: Ensure sessionId via HTTP POST unary carrier (NEVER through stream carrier)
-        let sessionId =
-          config.sessionId?.trim() || sessionCache.get(cacheKey) || loadStoredSession(cacheKey) || '';
+        const hasExplicitOverride = options?.sessionIdOverride !== undefined;
+        let sessionId = hasExplicitOverride
+          ? options?.sessionIdOverride?.trim() || ''
+          : config.sessionId?.trim() || sessionCache.get(cacheKey) || loadStoredSession(cacheKey) || '';
 
         if (!sessionId) {
           // Prefer the personal-assistant workspace (AGENTS.md persona/tools);
@@ -886,7 +1310,12 @@ export function streamDshMuxReply(
           }
           sessionCache.set(cacheKey, sessionId);
           storeSession(cacheKey, sessionId);
+        } else {
+          sessionCache.set(cacheKey, sessionId);
+          storeSession(cacheKey, sessionId);
         }
+
+        options?.onSessionResolved?.(sessionId);
 
         // Step 2: Subscribe to live output via stream carrier (`/api/remote.mux` -> `session/follow`)
         // Verified SessionFollowRequest shape: { address: { kind: "session", sessionId } }
@@ -961,57 +1390,89 @@ export function streamDshMuxReply(
 
         startFollow();
 
-        // Step 3: Submit prompt via HTTP POST unary carrier (`session/prompt`)
+        // Step 3: Submit prompt (with text + multimodal image/file attachments) via HTTP POST unary carrier
         const requestId = mintStreamId();
         const clientTimeZone = getClientTimeZone();
         sawPostPromptEvent = true;
 
-        const baseRequest: Record<string, unknown> = {
-          requestId,
-          sessionId,
-          mode: 'queue',
-          content: [{ type: 'text', text: prompt }],
-          clientTimeZone,
-        };
-
+        const contentCandidates = buildMultimodalContentCandidates(prompt, options?.attachments);
         let promptRes: unknown;
-        try {
-          promptRes = await callDshHttpUnary(
-            config,
-            promptEndpoint,
-            { request: baseRequest },
-            signal
-          );
-        } catch (promptErr) {
-          const msg = promptErr instanceof Error ? promptErr.message : String(promptErr);
+        let lastPromptError: Error | null = null;
 
-          if (
-            msg.toLowerCase().includes('content') &&
-            (msg.toLowerCase().includes('string') || msg.toLowerCase().includes('expected'))
-          ) {
+        for (let idx = 0; idx < contentCandidates.length; idx++) {
+          const candidateContent = contentCandidates[idx];
+          const reqBody: Record<string, unknown> = {
+            requestId: idx === 0 ? requestId : mintStreamId(),
+            sessionId,
+            mode: 'queue',
+            content: candidateContent,
+            clientTimeZone,
+          };
+
+          try {
             promptRes = await callDshHttpUnary(
               config,
               promptEndpoint,
-              {
-                request: {
-                  ...baseRequest,
-                  content: prompt,
+              { request: reqBody },
+              signal
+            );
+            lastPromptError = null;
+            break;
+          } catch (promptErr) {
+            if ((promptErr as Error).name === 'AbortError') throw promptErr;
+            const msg = promptErr instanceof Error ? promptErr.message : String(promptErr);
+            lastPromptError = new Error(msg);
+
+            const isBoundaryError =
+              msg.includes('boundary validation') ||
+              msg.includes('invalid_value') ||
+              msg.includes('invalid_union') ||
+              msg.includes('invalid_type') ||
+              msg.toLowerCase().includes('content');
+
+            if (isBoundaryError && idx < contentCandidates.length - 1) {
+              continue;
+            }
+
+            if (msg.includes('unexpected "mode"')) {
+              const withoutMode = { ...reqBody };
+              delete withoutMode.mode;
+              promptRes = await callDshHttpUnary(
+                config,
+                promptEndpoint,
+                { request: withoutMode },
+                signal
+              );
+              lastPromptError = null;
+              break;
+            }
+
+            if (
+              contentCandidates.length === 1 &&
+              msg.toLowerCase().includes('content') &&
+              (msg.toLowerCase().includes('string') || msg.toLowerCase().includes('expected'))
+            ) {
+              promptRes = await callDshHttpUnary(
+                config,
+                promptEndpoint,
+                {
+                  request: {
+                    ...reqBody,
+                    content: buildTextWithFileAttachments(prompt, options?.attachments),
+                  },
                 },
-              },
-              signal
-            );
-          } else if (msg.includes('unexpected "mode"')) {
-            const withoutMode = { ...baseRequest };
-            delete withoutMode.mode;
-            promptRes = await callDshHttpUnary(
-              config,
-              promptEndpoint,
-              { request: withoutMode },
-              signal
-            );
-          } else {
-            throw new Error(`提交消息 (${promptEndpoint}) 失败：${msg}`);
+                signal
+              );
+              lastPromptError = null;
+              break;
+            }
+
+            break;
           }
+        }
+
+        if (lastPromptError) {
+          throw new Error(`提交消息 (${promptEndpoint}) 失败：${lastPromptError.message}`);
         }
 
         // If the unary prompt response itself already contains reply text, render it immediately

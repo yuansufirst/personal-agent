@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bell,
   BookOpen,
@@ -13,6 +13,8 @@ import {
   MessageSquare,
   Moon,
   Network,
+  Plus,
+  RefreshCw,
   Server,
   Smartphone,
   Sun,
@@ -36,10 +38,15 @@ import type {
   MeshNode,
   QuickMacro,
   ReminderItem,
+  SessionRecord,
   TabKey,
 } from './types/relay';
 import { streamAgentReply } from './services/agentClient';
-import { resetDshSession } from './services/dshMuxClient';
+import {
+  listDshSessions,
+  loadDshSessionHistory,
+  resetDshSession,
+} from './services/dshMuxClient';
 import { ChatView } from './components/ChatView';
 import { BriefingsView } from './components/BriefingsView';
 import { MeshView } from './components/MeshView';
@@ -49,8 +56,10 @@ import { OfflineIndicator, PWAInstallButton } from './components/PWAComponents';
 
 const STORAGE_KEYS = {
   config: 'relay_connection_config_v2',
-  briefings: 'relay_briefings_v1',
-  reminders: 'relay_reminders_v1',
+  sessions: 'relay_sessions_v1',
+  activeSessionId: 'relay_active_session_v1',
+  briefings: 'relay_briefings_v2',
+  reminders: 'relay_reminders_v2',
   nodes: 'relay_mesh_nodes_v2',
   theme: 'relay_theme_v1',
 };
@@ -70,6 +79,35 @@ function nowTimeString(): string {
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
 }
 
+function createEmptySession(remoteSessionId?: string, title?: string): SessionRecord {
+  const cleanRemote = remoteSessionId?.trim() || undefined;
+  return {
+    id: cleanRemote || `local-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    remoteSessionId: cleanRemote,
+    title: title || (cleanRemote ? `会话 ${cleanRemote.slice(0, 8)}` : '新会话'),
+    updatedAt: nowTimeString(),
+    source: cleanRemote ? 'remote' : 'local',
+    messages: [],
+    historyLoaded: false,
+  };
+}
+
+function sanitizeSessionsForStorage(sessions: SessionRecord[]): SessionRecord[] {
+  return sessions.slice(0, 40).map((s) => ({
+    ...s,
+    messages: s.messages.slice(-80).map((m) => ({
+      ...m,
+      streaming: false,
+      attachments: m.attachments?.map((att) => ({
+        name: att.name,
+        size: att.size,
+        mimeType: att.mimeType,
+        dataUrl: att.dataUrl && att.dataUrl.length < 180_000 ? att.dataUrl : undefined,
+      })),
+    })),
+  }));
+}
+
 export default function App() {
   const [activeTab, setActiveTab] = useState<TabKey>('chat');
   const [darkMode, setDarkMode] = useState<boolean>(() => {
@@ -82,27 +120,86 @@ export default function App() {
   const [config, setConfig] = useState<ConnectionConfig>(() =>
     loadFromStorage(STORAGE_KEYS.config, DEFAULT_CONNECTION_CONFIG)
   );
-  const [messages, setMessages] = useState<ChatMessage[]>(INITIAL_MESSAGES);
-  const [briefings, setBriefings] = useState<BriefingItem[]>(() =>
-    loadFromStorage(STORAGE_KEYS.briefings, INITIAL_BRIEFINGS)
-  );
-  const [reminders, setReminders] = useState<ReminderItem[]>(() =>
-    loadFromStorage(STORAGE_KEYS.reminders, INITIAL_REMINDERS)
-  );
+
+  const [sessions, setSessions] = useState<SessionRecord[]>(() => {
+    const saved = loadFromStorage<SessionRecord[]>(STORAGE_KEYS.sessions, []);
+    if (saved.length > 0) return saved;
+    const initialCfg = loadFromStorage(STORAGE_KEYS.config, DEFAULT_CONNECTION_CONFIG);
+    if (initialCfg.mode === 'sandbox') {
+      return [
+        {
+          id: 'sandbox-demo',
+          title: '本地体验会话',
+          updatedAt: nowTimeString(),
+          source: 'local',
+          messages: INITIAL_MESSAGES,
+          historyLoaded: true,
+        },
+      ];
+    }
+    return [createEmptySession(initialCfg.sessionId)];
+  });
+
+  const [activeSessionId, setActiveSessionId] = useState<string>(() => {
+    const savedId = loadFromStorage<string>(STORAGE_KEYS.activeSessionId, '');
+    const savedSessions = loadFromStorage<SessionRecord[]>(STORAGE_KEYS.sessions, []);
+    if (savedId && savedSessions.some((s) => s.id === savedId)) {
+      return savedId;
+    }
+    if (savedSessions.length > 0) {
+      return savedSessions[0].id;
+    }
+    return '';
+  });
+
+  const [briefings, setBriefings] = useState<BriefingItem[]>(() => {
+    const initialCfg = loadFromStorage(STORAGE_KEYS.config, DEFAULT_CONNECTION_CONFIG);
+    return loadFromStorage(
+      STORAGE_KEYS.briefings,
+      initialCfg.mode === 'sandbox' ? INITIAL_BRIEFINGS : []
+    );
+  });
+
+  const [reminders, setReminders] = useState<ReminderItem[]>(() => {
+    const initialCfg = loadFromStorage(STORAGE_KEYS.config, DEFAULT_CONNECTION_CONFIG);
+    return loadFromStorage(
+      STORAGE_KEYS.reminders,
+      initialCfg.mode === 'sandbox' ? INITIAL_REMINDERS : []
+    );
+  });
+
   const [nodes, setNodes] = useState<MeshNode[]>(() =>
     loadFromStorage(STORAGE_KEYS.nodes, INITIAL_MESH_NODES)
   );
-  const [files, setFiles] = useState<MeshFileItem[]>(INITIAL_FILES);
+
+  const [files, setFiles] = useState<MeshFileItem[]>(() => {
+    const initialCfg = loadFromStorage(STORAGE_KEYS.config, DEFAULT_CONNECTION_CONFIG);
+    return initialCfg.mode === 'sandbox' ? INITIAL_FILES : [];
+  });
 
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [selectedBriefing, setSelectedBriefing] = useState<BriefingItem | null>(null);
   const [previewFile, setPreviewFile] = useState<MeshFileItem | null>(null);
   const [isStreaming, setIsStreaming] = useState(false);
   const [isFetchingDigest, setIsFetchingDigest] = useState(false);
+  const [isLoadingSessions, setIsLoadingSessions] = useState(false);
+  const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
   const abortRef = useRef<AbortController | null>(null);
   const toastTimerRef = useRef<number | null>(null);
+
+  const activeSession = useMemo(() => {
+    return sessions.find((s) => s.id === activeSessionId) || sessions[0] || createEmptySession();
+  }, [sessions, activeSessionId]);
+
+  const messages = activeSession.messages;
+
+  useEffect(() => {
+    if (activeSession.id !== activeSessionId) {
+      setActiveSessionId(activeSession.id);
+    }
+  }, [activeSession.id, activeSessionId]);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', darkMode);
@@ -112,6 +209,18 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.config, JSON.stringify(config));
   }, [config]);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        STORAGE_KEYS.sessions,
+        JSON.stringify(sanitizeSessionsForStorage(sessions))
+      );
+      localStorage.setItem(STORAGE_KEYS.activeSessionId, JSON.stringify(activeSession.id));
+    } catch {
+      // Ignore quota errors
+    }
+  }, [sessions, activeSession.id]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.briefings, JSON.stringify(briefings));
@@ -125,18 +234,199 @@ export default function App() {
     localStorage.setItem(STORAGE_KEYS.nodes, JSON.stringify(nodes));
   }, [nodes]);
 
-  const showToast = (msg: string) => {
+  const showToast = useCallback((msg: string) => {
     setToast(msg);
     if (toastTimerRef.current) {
       window.clearTimeout(toastTimerRef.current);
     }
     toastTimerRef.current = window.setTimeout(() => setToast(null), 2800);
+  }, []);
+
+  const updateSessionMessages = useCallback(
+    (sessionId: string, updater: (prev: ChatMessage[]) => ChatMessage[]) => {
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.id === sessionId
+            ? { ...s, messages: updater(s.messages), updatedAt: nowTimeString() }
+            : s
+        )
+      );
+    },
+    []
+  );
+
+  const handleRefreshSessions = useCallback(
+    async (silent = false) => {
+      if (config.mode !== 'dsh-bridge') return;
+      setIsLoadingSessions(true);
+      try {
+        const remoteList = await listDshSessions(config);
+        if (remoteList.length === 0) {
+          if (!silent) {
+            showToast('未从云端拉取到历史会话，可在弹窗底部粘贴 Session ID 直接接入');
+          }
+          return;
+        }
+
+        setSessions((prev) => {
+          const merged = [...prev];
+          for (const remote of remoteList) {
+            const existingIdx = merged.findIndex(
+              (s) => s.remoteSessionId === remote.sessionId || s.id === remote.sessionId
+            );
+            if (existingIdx >= 0) {
+              merged[existingIdx] = {
+                ...merged[existingIdx],
+                remoteSessionId: remote.sessionId,
+                source: 'remote',
+                title:
+                  merged[existingIdx].title === '新会话' ||
+                  merged[existingIdx].title.startsWith('会话 ')
+                    ? remote.title
+                    : merged[existingIdx].title,
+                updatedAt: remote.updatedAt || merged[existingIdx].updatedAt,
+              };
+            } else {
+              merged.push({
+                id: remote.sessionId,
+                remoteSessionId: remote.sessionId,
+                title: remote.title,
+                updatedAt: remote.updatedAt,
+                source: 'remote',
+                messages: [],
+                historyLoaded: false,
+              });
+            }
+          }
+          return merged;
+        });
+
+        if (!silent) {
+          showToast(`已同步 ${remoteList.length} 个云端会话`);
+        }
+      } catch {
+        if (!silent) {
+          showToast('同步云端会话列表失败，请确认 Tailscale 连接正常');
+        }
+      } finally {
+        setIsLoadingSessions(false);
+      }
+    },
+    [config, showToast]
+  );
+
+  const didInitFetchRef = useRef(false);
+  useEffect(() => {
+    if (config.mode === 'dsh-bridge' && !didInitFetchRef.current) {
+      didInitFetchRef.current = true;
+      void handleRefreshSessions(true);
+    }
+  }, [config.mode, handleRefreshSessions]);
+
+  const handleSelectSession = async (targetId: string) => {
+    if (abortRef.current) {
+      abortRef.current.abort();
+      setIsStreaming(false);
+    }
+
+    const target = sessions.find((s) => s.id === targetId);
+    if (!target) return;
+
+    setActiveSessionId(target.id);
+
+    if (
+      config.mode === 'dsh-bridge' &&
+      target.remoteSessionId &&
+      target.messages.length === 0 &&
+      !target.historyLoaded
+    ) {
+      setIsLoadingHistory(true);
+      try {
+        const hist = await loadDshSessionHistory(config, target.remoteSessionId);
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === target.id
+              ? {
+                  ...s,
+                  messages: hist.length > 0 ? hist : s.messages,
+                  historyLoaded: true,
+                }
+              : s
+          )
+        );
+      } finally {
+        setIsLoadingHistory(false);
+      }
+    }
+  };
+
+  const handleBindSessionId = async (remoteSessionId: string) => {
+    const clean = remoteSessionId.trim();
+    if (!clean) return;
+
+    const existing = sessions.find((s) => s.remoteSessionId === clean || s.id === clean);
+    if (existing) {
+      await handleSelectSession(existing.id);
+      showToast(`已切换到会话 ${clean.slice(0, 8)}`);
+      return;
+    }
+
+    const created = createEmptySession(clean);
+    setSessions((prev) => [created, ...prev]);
+    setActiveSessionId(created.id);
+    showToast(`已接入会话 ${clean.slice(0, 8)}`);
+
+    if (config.mode === 'dsh-bridge') {
+      setIsLoadingHistory(true);
+      try {
+        const hist = await loadDshSessionHistory(config, clean);
+        setSessions((prev) =>
+          prev.map((s) =>
+            s.id === created.id
+              ? {
+                  ...s,
+                  messages: hist,
+                  historyLoaded: true,
+                  title:
+                    hist.find((m) => m.role === 'user')?.content.slice(0, 22) || created.title,
+                }
+              : s
+          )
+        );
+      } finally {
+        setIsLoadingHistory(false);
+      }
+    }
+  };
+
+  const handleDeleteSession = (targetId: string) => {
+    setSessions((prev) => {
+      if (prev.length <= 1) return prev;
+      const next = prev.filter((s) => s.id !== targetId);
+      if (activeSession.id === targetId && next.length > 0) {
+        setActiveSessionId(next[0].id);
+      }
+      return next;
+    });
+  };
+
+  const handleNewSession = () => {
+    if (abortRef.current) abortRef.current.abort();
+    setIsStreaming(false);
+    resetDshSession(config);
+    const fresh = createEmptySession();
+    setSessions((prev) => [fresh, ...prev]);
+    setActiveSessionId(fresh.id);
+    showToast('已创建新会话');
   };
 
   const handleSendMessage = async (text: string, attachments?: ChatAttachment[]) => {
     if (isStreaming && abortRef.current) {
       abortRef.current.abort();
     }
+
+    const currentSessionId = activeSession.id;
+    const currentRemoteId = activeSession.remoteSessionId;
 
     const userMsg: ChatMessage = {
       id: `user-${Date.now()}`,
@@ -155,20 +445,39 @@ export default function App() {
       streaming: true,
     };
 
-    const nextHistory = [...messages, userMsg];
-    setMessages([...nextHistory, placeholderMsg]);
+    const nextHistory = [...activeSession.messages, userMsg];
+
+    setSessions((prev) =>
+      prev.map((s) => {
+        if (s.id !== currentSessionId) return s;
+        const shouldAutoTitle = s.title === '新会话' || s.title.startsWith('会话 ');
+        const autoTitle = text.trim().slice(0, 24) || attachments?.[0]?.name || s.title;
+        return {
+          ...s,
+          title: shouldAutoTitle ? autoTitle : s.title,
+          updatedAt: nowTimeString(),
+          messages: [...nextHistory, placeholderMsg],
+        };
+      })
+    );
+
     setIsStreaming(true);
 
     const controller = new AbortController();
     abortRef.current = controller;
 
+    const effectiveConfig: ConnectionConfig =
+      config.mode === 'dsh-bridge'
+        ? { ...config, sessionId: currentRemoteId || '' }
+        : config;
+
     try {
       await streamAgentReply(
         text,
         nextHistory,
-        config,
+        effectiveConfig,
         (chunk) => {
-          setMessages((prev) =>
+          updateSessionMessages(currentSessionId, (prev) =>
             prev.map((m) =>
               m.id === assistantId
                 ? {
@@ -181,17 +490,34 @@ export default function App() {
             )
           );
         },
-        controller.signal
+        controller.signal,
+        {
+          attachments,
+          sessionIdOverride: currentRemoteId || '',
+          onSessionResolved: (resolvedRemoteId) => {
+            setSessions((prev) =>
+              prev.map((s) =>
+                s.id === currentSessionId
+                  ? {
+                      ...s,
+                      remoteSessionId: resolvedRemoteId,
+                      source: 'remote',
+                    }
+                  : s
+              )
+            );
+          },
+        }
       );
     } catch (err) {
       if ((err as Error).name !== 'AbortError') {
         const message = err instanceof Error ? err.message : '请求失败，请检查服务器连接';
-        setMessages((prev) =>
+        updateSessionMessages(currentSessionId, (prev) =>
           prev.map((m) =>
             m.id === assistantId
               ? {
                   ...m,
-                  content: `连接云端 Agent 遇到问题：${message}\n\n你可以点击「连接配置」检查 Tailscale 地址或切换回本地体验模式。`,
+                  content: `连接云端 Agent 遇到问题：${message}`,
                   streaming: false,
                 }
               : m
@@ -208,23 +534,10 @@ export default function App() {
     if (abortRef.current) {
       abortRef.current.abort();
       setIsStreaming(false);
-      setMessages((prev) => prev.map((m) => (m.streaming ? { ...m, streaming: false } : m)));
+      updateSessionMessages(activeSession.id, (prev) =>
+        prev.map((m) => (m.streaming ? { ...m, streaming: false } : m))
+      );
     }
-  };
-
-  const handleNewSession = () => {
-    if (abortRef.current) abortRef.current.abort();
-    setIsStreaming(false);
-    resetDshSession(config);
-    setMessages([
-      {
-        id: `welcome-${Date.now()}`,
-        role: 'assistant',
-        timestamp: nowTimeString(),
-        content: '已开启全新会话。你可以直接下发 PC/手机控制指令，或让我为你生成今日新闻、论文与提醒卡片。',
-      },
-    ]);
-    showToast('已开启新的对话会话');
   };
 
   const handleToggleSaveBriefing = (item: BriefingItem) => {
@@ -236,7 +549,7 @@ export default function App() {
       }
       return [{ ...item, saved: true }, ...prev];
     });
-    setMessages((prev) =>
+    updateSessionMessages(activeSession.id, (prev) =>
       prev.map((m) => ({
         ...m,
         cards: m.cards?.map((c) =>
@@ -250,6 +563,12 @@ export default function App() {
   };
 
   const handleFetchFreshDigest = () => {
+    if (config.mode !== 'sandbox') {
+      setActiveTab('chat');
+      void handleSendMessage('请帮我抓取并整理今天的 AI 论文与科技简报。');
+      return;
+    }
+
     setIsFetchingDigest(true);
     window.setTimeout(() => {
       const fresh: BriefingItem = {
@@ -281,7 +600,9 @@ export default function App() {
 
   const handleAskAboutBriefing = (item: BriefingItem) => {
     setActiveTab('chat');
-    handleSendMessage(`请结合我的工作流深入解读这篇内容：《${item.title}》（${item.source}），并给出 2 条可执行建议。`);
+    void handleSendMessage(
+      `请结合我的工作流深入解读这篇内容：《${item.title}》（${item.source}），并给出 2 条可执行建议。`
+    );
   };
 
   const handleSendBriefingToPC = (item: BriefingItem) => {
@@ -306,7 +627,7 @@ export default function App() {
     setReminders((prev) =>
       prev.map((r) => (r.id === id ? { ...r, completed: !r.completed } : r))
     );
-    setMessages((prev) =>
+    updateSessionMessages(activeSession.id, (prev) =>
       prev.map((m) => ({
         ...m,
         cards: m.cards?.map((c) =>
@@ -322,7 +643,7 @@ export default function App() {
     setReminders((prev) =>
       prev.map((r) => (r.id === id ? { ...r, dueLabel: `${r.dueLabel}（已延后 30m）` } : r))
     );
-    setMessages((prev) =>
+    updateSessionMessages(activeSession.id, (prev) =>
       prev.map((m) => ({
         ...m,
         cards: m.cards?.map((c) =>
@@ -362,7 +683,7 @@ export default function App() {
         (c): c is Extract<InteractiveCard, { type: 'approval' }> =>
           c.type === 'approval' && c.data.id === actionId
       );
-    setMessages((prev) =>
+    updateSessionMessages(activeSession.id, (prev) =>
       prev.map((m) => ({
         ...m,
         cards: m.cards?.map((c) =>
@@ -374,7 +695,7 @@ export default function App() {
                   status: decision,
                   resultOutput:
                     decision === 'approved'
-                      ? '指令已通过 Tailscale 下发并执行成功（耗时 0.8s）'
+                      ? '指令已通过 Tailscale 下发并执行成功'
                       : undefined,
                 },
               }
@@ -384,7 +705,7 @@ export default function App() {
     );
     showToast(decision === 'approved' ? '已批准并通过 Tailscale 下发执行' : '已拒绝该操作');
     if (decision === 'approved' && action) {
-      handleSendMessage(
+      void handleSendMessage(
         `已批准执行：${action.data.targetDevice} · ${action.data.commandPreview}。请在云端确认并执行，完成后把结果告诉我。`
       );
     }
@@ -399,7 +720,7 @@ export default function App() {
 
   const handleRunMacro = (macro: QuickMacro) => {
     setActiveTab('chat');
-    handleSendMessage(macro.command);
+    void handleSendMessage(macro.command);
   };
 
   const handleUploadLocalFile = (file: File) => {
@@ -421,7 +742,7 @@ export default function App() {
         updatedAt: '刚刚',
         status: 'synced',
         previewText:
-          previewText || '已加入 Tailscale 传输队列，可在对话中让云端 Agent 读取或转存到电脑。',
+          previewText || '已加入设备网文件列表，可在对话中让云端 Agent 读取或处理。',
       };
       setFiles((prev) => [entry, ...prev]);
       showToast(`已添加 ${file.name} 到设备网文件流`);
@@ -439,10 +760,11 @@ export default function App() {
 
   const handleAskAboutFile = (file: MeshFileItem) => {
     setActiveTab('chat');
-    handleSendMessage(`请读取并总结设备网文件「${file.name}」（路径：${file.path}）的核心内容。`);
+    void handleSendMessage(`请读取并总结设备网文件「${file.name}」（路径：${file.path}）的核心内容。`);
   };
 
   const pendingTodayCount = reminders.filter((r) => !r.completed && r.dayGroup === 'today').length;
+  const todayReminders = reminders.filter((r) => r.dayGroup === 'today');
 
   const navItems: {
     key: TabKey;
@@ -460,13 +782,8 @@ export default function App() {
       {/* Desktop Left Navigation Rail */}
       <aside className="hidden lg:flex lg:w-60 lg:shrink-0 lg:flex-col lg:justify-between border-r border-slate-200/90 bg-white px-4 py-5 dark:border-slate-800/90 dark:bg-[#10141D]">
         <div>
-          {/* Clean Single-Element Brand Wordmark */}
           <div className="flex items-center gap-2.5 px-2">
-            <img
-              src="/icon.svg"
-              alt="Relay"
-              className="h-7 w-7 rounded-lg"
-            />
+            <img src="/icon.svg" alt="Relay" className="h-7 w-7 rounded-lg" />
             <span className="text-lg font-bold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap shrink-0">
               Relay
             </span>
@@ -563,11 +880,19 @@ export default function App() {
           <div className="h-full pb-[60px] lg:pb-0">
             <ChatView
               messages={messages}
+              sessions={sessions}
+              activeSession={activeSession}
+              isLoadingSessions={isLoadingSessions}
+              isLoadingHistory={isLoadingHistory}
               config={config}
               isStreaming={isStreaming}
               onSendMessage={handleSendMessage}
               onStopStreaming={handleStopStreaming}
               onNewSession={handleNewSession}
+              onSelectSession={handleSelectSession}
+              onDeleteSession={handleDeleteSession}
+              onRefreshSessions={() => void handleRefreshSessions(false)}
+              onBindSessionId={(id) => void handleBindSessionId(id)}
               onOpenConnection={() => setConnectionOpen(true)}
               onToggleSaveBriefing={handleToggleSaveBriefing}
               onOpenBriefing={(item) => {
@@ -629,9 +954,68 @@ export default function App() {
         )}
       </main>
 
-      {/* Desktop Right Context Panel (fills 1440px viewport purposefully on Chat tab) */}
+      {/* Desktop Right Context Panel: Session Switcher + Mesh + Real Reminders */}
       {activeTab === 'chat' && (
         <aside className="hidden xl:flex xl:w-80 xl:shrink-0 xl:flex-col border-l border-slate-200/90 bg-white/70 px-5 py-5 overflow-y-auto dark:border-slate-800/90 dark:bg-[#10141D]/70 space-y-6">
+          {/* Sessions List */}
+          <div>
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                会话列表
+              </h2>
+              <div className="flex items-center gap-1">
+                {config.mode === 'dsh-bridge' && (
+                  <button
+                    type="button"
+                    onClick={() => void handleRefreshSessions(false)}
+                    disabled={isLoadingSessions}
+                    aria-label="刷新云端会话"
+                    className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-blue-600 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-blue-400"
+                  >
+                    <RefreshCw
+                      className={`h-3.5 w-3.5 ${isLoadingSessions ? 'animate-spin' : ''}`}
+                    />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={handleNewSession}
+                  aria-label="新建会话"
+                  className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-blue-600 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-blue-400"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            </div>
+            <div className="mt-3 divide-y divide-slate-100 rounded-2xl border border-slate-200/80 bg-white dark:divide-slate-800/80 dark:border-slate-800 dark:bg-[#131822]">
+              {sessions.slice(0, 12).map((s) => {
+                const isActive = s.id === activeSession.id;
+                return (
+                  <button
+                    key={s.id}
+                    type="button"
+                    onClick={() => void handleSelectSession(s.id)}
+                    className={`flex w-full items-center justify-between gap-2 px-3.5 py-2.5 text-left transition-colors first:rounded-t-2xl last:rounded-b-2xl ${
+                      isActive
+                        ? 'bg-blue-50/70 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300'
+                        : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <div className="truncate text-xs font-medium">{s.title}</div>
+                      <div className="mt-0.5 font-mono-tabular text-[11px] text-slate-400">
+                        {s.source === 'remote' ? '云端' : '本地'} · {s.updatedAt}
+                      </div>
+                    </div>
+                    {isActive && (
+                      <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
           {/* Tailscale Mesh Quick Overview */}
           <div>
             <div className="flex items-center justify-between">
@@ -655,46 +1039,39 @@ export default function App() {
                       ? Laptop
                       : Smartphone;
                 return (
-                  <div key={node.id} className="flex items-center justify-between gap-2.5 px-3.5 py-3">
-                    <div className="flex items-center gap-2.5 min-w-0">
-                      <Icon className="h-4 w-4 shrink-0 text-slate-500 dark:text-slate-400" />
-                      <div className="min-w-0">
-                        <div className="truncate text-xs font-medium text-slate-900 dark:text-slate-100">
-                          {node.name}
-                        </div>
-                        <div className="font-mono-tabular text-[11px] text-slate-500 dark:text-slate-400">
-                          {node.tailscaleIp}
-                        </div>
+                  <div key={node.id} className="flex items-center gap-2.5 px-3.5 py-3">
+                    <Icon className="h-4 w-4 shrink-0 text-slate-500 dark:text-slate-400" />
+                    <div className="min-w-0">
+                      <div className="truncate text-xs font-medium text-slate-900 dark:text-slate-100">
+                        {node.name}
+                      </div>
+                      <div className="truncate font-mono-tabular text-[11px] text-slate-500 dark:text-slate-400">
+                        {node.tailscaleIp}
                       </div>
                     </div>
-                    <span className="font-mono-tabular text-[11px] text-slate-400 shrink-0">
-                      {node.latencyMs}ms
-                    </span>
                   </div>
                 );
               })}
             </div>
           </div>
 
-          {/* Today's Reminders */}
-          <div>
-            <div className="flex items-center justify-between">
-              <h2 className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                今日待办提醒
-              </h2>
-              <button
-                type="button"
-                onClick={() => setActiveTab('reminders')}
-                className="text-xs font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400"
-              >
-                全部
-              </button>
-            </div>
-            <div className="mt-3 divide-y divide-slate-100 rounded-2xl border border-slate-200/80 bg-white dark:divide-slate-800/80 dark:border-slate-800 dark:bg-[#131822]">
-              {reminders
-                .filter((r) => r.dayGroup === 'today')
-                .slice(0, 4)
-                .map((item) => (
+          {/* Real Reminders (only shown when user has reminders) */}
+          {todayReminders.length > 0 && (
+            <div>
+              <div className="flex items-center justify-between">
+                <h2 className="text-xs font-semibold text-slate-900 dark:text-slate-100">
+                  今日待办提醒
+                </h2>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('reminders')}
+                  className="text-xs font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400"
+                >
+                  全部
+                </button>
+              </div>
+              <div className="mt-3 divide-y divide-slate-100 rounded-2xl border border-slate-200/80 bg-white dark:divide-slate-800/80 dark:border-slate-800 dark:bg-[#131822]">
+                {todayReminders.slice(0, 4).map((item) => (
                   <button
                     key={item.id}
                     type="button"
@@ -726,30 +1103,9 @@ export default function App() {
                     </div>
                   </button>
                 ))}
+              </div>
             </div>
-          </div>
-
-          {/* Quick Macros */}
-          <div>
-            <h2 className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-              一键指令
-            </h2>
-            <div className="mt-3 space-y-2">
-              {QUICK_MACROS.slice(0, 3).map((m) => (
-                <button
-                  key={m.id}
-                  type="button"
-                  onClick={() => handleRunMacro(m)}
-                  className="flex w-full items-center justify-between rounded-xl border border-slate-200/80 bg-white px-3.5 py-2.5 text-left text-xs font-medium text-slate-700 transition-colors hover:border-blue-300 hover:text-blue-600 dark:border-slate-800 dark:bg-[#131822] dark:text-slate-200 dark:hover:border-blue-800 dark:hover:text-blue-400"
-                >
-                  <span className="truncate">{m.label}</span>
-                  <span className="font-mono-tabular text-[11px] text-slate-400 shrink-0">
-                    执行
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
+          )}
         </aside>
       )}
 
@@ -788,6 +1144,9 @@ export default function App() {
         onSave={(next) => {
           resetDshSession(config);
           setConfig(next);
+          if (next.sessionId?.trim()) {
+            void handleBindSessionId(next.sessionId.trim());
+          }
           showToast(
             next.mode === 'sandbox'
               ? '已切换为本地交互体验模式'

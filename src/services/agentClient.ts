@@ -1,10 +1,15 @@
 import { BRIEFING_IMAGES } from '../data/initialData';
 import type {
+  ChatAttachment,
   ChatMessage,
   ConnectionConfig,
   InteractiveCard,
 } from '../types/relay';
-import { streamDshMuxReply, testDshWebSocket } from './dshMuxClient';
+import {
+  streamDshMuxReply,
+  testDshWebSocket,
+  type StreamDshOptions,
+} from './dshMuxClient';
 
 export interface AgentReplyChunk {
   text: string;
@@ -256,12 +261,20 @@ export async function streamAgentReply(
   history: ChatMessage[],
   config: ConnectionConfig,
   onChunk: (chunk: AgentReplyChunk) => void,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  options?: StreamDshOptions
 ): Promise<void> {
+  const attachments = options?.attachments;
+
   if (config.mode === 'sandbox') {
     const simulated = buildSandboxResponse(prompt);
+    const attachmentNote =
+      attachments && attachments.length > 0
+        ? `\n\n已收到附件：${attachments.map((a) => `${a.name} (${a.size})`).join('、')}。`
+        : '';
+    const finalText = `${simulated.text}${attachmentNote}`;
     let accumulated = '';
-    const chars = Array.from(simulated.text);
+    const chars = Array.from(finalText);
 
     for (let i = 0; i < chars.length; i += 3) {
       if (signal?.aborted) return;
@@ -270,7 +283,7 @@ export async function streamAgentReply(
       await new Promise((r) => setTimeout(r, 18));
     }
 
-    onChunk({ text: simulated.text, cards: simulated.cards, done: true });
+    onChunk({ text: finalText, cards: simulated.cards, done: true });
     return;
   }
 
@@ -283,14 +296,38 @@ export async function streamAgentReply(
   }
 
   if (config.mode === 'openai-compatible') {
+    const textBlocks: string[] = [];
+    const imageParts: { type: 'image_url'; image_url: { url: string } }[] = [];
+
+    if (attachments && attachments.length > 0) {
+      for (const att of attachments) {
+        if (att.textContent) {
+          textBlocks.push(`[附件文件: ${att.name}]\n\`\`\`\n${att.textContent.slice(0, 40000)}\n\`\`\``);
+        } else if (att.mimeType.startsWith('image/') && att.dataUrl) {
+          imageParts.push({ type: 'image_url', image_url: { url: att.dataUrl } });
+        }
+      }
+    }
+
+    const fullUserText = textBlocks.length > 0 ? `${prompt}\n\n${textBlocks.join('\n\n')}` : prompt;
+    const userContent: unknown =
+      imageParts.length > 0
+        ? [{ type: 'text', text: fullUserText }, ...imageParts]
+        : fullUserText;
+
+    const priorHistory = history.slice(0, -1).slice(-10).map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
+
     const apiMessages = [
       {
         role: 'system',
         content:
           'You are a personal agent connected to Relay mobile hub over Tailscale. When returning structured briefings, reminders, file transfers, or command approvals, you may optionally append a ```relay-card JSON block.',
       },
-      ...history.slice(-10).map((m) => ({ role: m.role, content: m.content })),
-      { role: 'user', content: prompt },
+      ...priorHistory,
+      { role: 'user', content: userContent },
     ];
 
     const res = await fetch(`${base}/v1/chat/completions`, {
@@ -353,6 +390,6 @@ export async function streamAgentReply(
     return;
   }
 
-  // DeepSeek Harness (dsh) WebSocket /api/remote.mux client-request RPC
-  return streamDshMuxReply(prompt, config, onChunk, signal);
+  // DeepSeek Harness (dsh) HTTP unary + WebSocket /api/remote.mux
+  return streamDshMuxReply(prompt, config, onChunk, signal, options);
 }

@@ -94,6 +94,9 @@ export interface ChatAttachment {
   name: string;
   size: string;
   mimeType: string;
+  dataUrl?: string;
+  base64Data?: string;
+  textContent?: string;
 }
 
 export interface ChatMessage {
@@ -105,4 +108,21 @@ export interface ChatMessage {
   cards?: InteractiveCard[];
   streaming?: boolean;
   commandUsed?: string;
+}
+
+export interface RemoteSessionSummary {
+  sessionId: string;
+  title: string;
+  updatedAt: string;
+  preview?: string;
+}
+
+export interface SessionRecord {
+  id: string;
+  remoteSessionId?: string;
+  title: string;
+  updatedAt: string;
+  source: 'remote' | 'local';
+  messages: ChatMessage[];
+  historyLoaded?: boolean;
 }
