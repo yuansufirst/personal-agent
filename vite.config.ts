@@ -5,8 +5,11 @@ import path from 'path';
 import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
 
+const APP_BASE = process.env.VITE_BASE || '/';
+
 export default defineConfig(() => {
   return {
+    base: APP_BASE,
     plugins: [
       react(),
       tailwindcss(),
@@ -14,30 +17,30 @@ export default defineConfig(() => {
         registerType: 'autoUpdate',
         includeAssets: ['icon.svg', 'apple-touch-icon.png'],
         manifest: {
-          id: '/',
+          id: APP_BASE,
           name: 'Relay — 私人 Agent 交互中枢',
           short_name: 'Relay',
           description: '连接 Tailscale 个人设备网与 DeepSeek Harness 的移动端私人 Agent 控制台。',
           theme_color: '#0F172A',
           background_color: '#F6F7F9',
           display: 'standalone',
-          start_url: '/',
-          scope: '/',
+          start_url: APP_BASE,
+          scope: APP_BASE,
           icons: [
             {
-              src: '/pwa-192x192.png',
+              src: `${APP_BASE}pwa-192x192.png`,
               sizes: '192x192',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-512x512.png',
+              src: `${APP_BASE}pwa-512x512.png`,
               sizes: '512x512',
               type: 'image/png',
               purpose: 'any',
             },
             {
-              src: '/pwa-maskable-512x512.png',
+              src: `${APP_BASE}pwa-maskable-512x512.png`,
               sizes: '512x512',
               type: 'image/png',
               purpose: 'maskable',

@@ -460,6 +460,23 @@ function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent
     return { isSnapshot: true };
   }
 
+  // Live assistant stream frames: { type: 'assistant-stream', frame: { type: 'chunk', chunk } }
+  if (frameType === 'assistant-stream') {
+    const streamFrame = (obj.frame && typeof obj.frame === 'object'
+      ? (obj.frame as Record<string, unknown>)
+      : {}) as Record<string, unknown>;
+    if (streamFrame.type === 'chunk') {
+      const chunk = (streamFrame.chunk && typeof streamFrame.chunk === 'object'
+        ? (streamFrame.chunk as Record<string, unknown>)
+        : {}) as Record<string, unknown>;
+      if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
+        return { delta: chunk.text };
+      }
+      return {};
+    }
+    return {};
+  }
+
   // Unwrap wrapper envelopes like { kind: 'event', event: {...} } or { entry: {...} }
   const inner =
     (obj.event && typeof obj.event === 'object' ? (obj.event as Record<string, unknown>) : null) ||
@@ -531,12 +548,22 @@ function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent
       typeof inner.message === 'object' &&
       (inner.message as Record<string, unknown>).role === 'assistant')
   ) {
+    const data = (inner.data && typeof inner.data === 'object'
+      ? (inner.data as Record<string, unknown>)
+      : {}) as Record<string, unknown>;
+    const dataMessage = data.message && typeof data.message === 'object'
+      ? (data.message as Record<string, unknown>)
+      : null;
+    const innerMessage = inner.message && typeof inner.message === 'object'
+      ? (inner.message as Record<string, unknown>)
+      : null;
     const fullText =
+      (dataMessage ? extractTextParts(dataMessage.content) : '') ||
       extractTextParts(inner.content) ||
       (typeof inner.text === 'string' ? inner.text : '') ||
-      (inner.message && typeof inner.message === 'object'
-        ? extractTextParts((inner.message as Record<string, unknown>).content)
-        : '');
+      extractTextParts(data.content) ||
+      (innerMessage ? extractTextParts(innerMessage.content) : '') ||
+      '';
     return { fullText: fullText || undefined, done: false };
   }
 
@@ -832,6 +859,7 @@ export function streamDshMuxReply(
                 kind: 'session',
                 sessionId,
               },
+              assistantStream: true,
             },
           };
 
