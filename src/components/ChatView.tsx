@@ -375,24 +375,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
 
     voiceBaseInputRef.current = input.trim();
-    const session = await startVoiceRecognition({
-      onTranscript: (transcript, isFinal) => {
-        const prefix = voiceBaseInputRef.current;
-        const combined = prefix ? `${prefix} ${transcript}` : transcript;
-        setInput(combined);
-        if (isFinal) {
-          voiceBaseInputRef.current = combined;
+    const session = await startVoiceRecognition(
+      {
+        onTranscript: (transcript, isFinal) => {
+          const prefix = voiceBaseInputRef.current;
+          const combined = prefix ? `${prefix} ${transcript}` : transcript;
+          setInput(combined);
+          if (isFinal) {
+            voiceBaseInputRef.current = combined;
+            speechSessionRef.current = null;
+          }
+        },
+        onStateChange: (active) => {
+          setListening(active);
+        },
+        onError: (msg) => {
           speechSessionRef.current = null;
-        }
+          onShowToast(msg);
+        },
       },
-      onStateChange: (active) => {
-        setListening(active);
-      },
-      onError: (msg) => {
-        speechSessionRef.current = null;
-        onShowToast(msg);
-      },
-    });
+      { serverUrl: config.serverUrl }
+    );
 
     if (session) {
       speechSessionRef.current = session;

@@ -1,4 +1,5 @@
 import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
+import { startPcmCapture, transcribePcm } from './voiceCapture';
 
 interface NativeSpeechPlugin {
   start(options?: { language?: string }): Promise<{ mode?: string; transcript?: string }>;
@@ -47,11 +48,60 @@ export interface SpeechSessionHandle {
   stop: () => void;
 }
 
-export async function startVoiceRecognition(callbacks: {
-  onTranscript: (transcript: string, isFinal: boolean) => void;
-  onStateChange: (listening: boolean) => void;
-  onError: (message: string) => void;
-}): Promise<SpeechSessionHandle | null> {
+export interface StartVoiceOptions {
+  /** 服务器地址，配了就走「自己录音 + 服务器 SenseVoice 转写」这条路 */
+  serverUrl?: string;
+}
+
+export async function startVoiceRecognition(
+  callbacks: {
+    onTranscript: (transcript: string, isFinal: boolean) => void;
+    onStateChange: (listening: boolean) => void;
+    onError: (message: string) => void;
+  },
+  options?: StartVoiceOptions
+): Promise<SpeechSessionHandle | null> {
+  // 0) 首选：自己录音 + 上传服务器转写。
+  // 部分国产 ROM 的系统语音服务即使授权了也会回「缺少麦克风权限」，
+  // 自己录音不依赖它，权限拿得到就能用。
+  if (options?.serverUrl) {
+    const serverUrl = options.serverUrl;
+    let captureHandle: Awaited<ReturnType<typeof startPcmCapture>> | null = null;
+    try {
+      captureHandle = await startPcmCapture(() => callbacks.onStateChange(false));
+    } catch {
+      captureHandle = null;
+    }
+    if (captureHandle) {
+      const capture = captureHandle;
+      callbacks.onStateChange(true);
+      return {
+        stop: () => {
+          callbacks.onStateChange(false);
+          void (async () => {
+            try {
+              const recorded = await capture.stop();
+              if (recorded.durationMs < 300 || recorded.pcm.length === 0) {
+                callbacks.onError('说话时间太短，再按一次试试');
+                return;
+              }
+              const controller = new AbortController();
+              const timer = window.setTimeout(() => controller.abort(), 60_000);
+              try {
+                const text = await transcribePcm(serverUrl, recorded, controller.signal);
+                callbacks.onTranscript(text, true);
+              } finally {
+                window.clearTimeout(timer);
+              }
+            } catch (err) {
+              callbacks.onError(err instanceof Error ? err.message : '语音转写失败，请重试');
+            }
+          })();
+        },
+      };
+    }
+  }
+
   // Prefer native Android SpeechRecognizer / RecognizerIntent inside the APK
   if (Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('NativeSpeech')) {
     const handles: PluginListenerHandle[] = [];
