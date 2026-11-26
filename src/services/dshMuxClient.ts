@@ -1,10 +1,12 @@
 import type {
+  AgentToolStep,
   ChatAttachment,
   ChatMessage,
   ConnectionConfig,
   RemoteSessionSummary,
 } from '../types/relay';
 import { extractRelayCards, type AgentReplyChunk } from './agentClient';
+import { createDshWebSocket, type DshWebSocketLike } from './nativeSocket';
 
 /**
  * DeepSeek Harness (/api/remote.mux) stream-protocol.ts frames
@@ -300,7 +302,7 @@ export function testDshWebSocket(
     const started = performance.now();
     let settled = false;
     let diagnosingError = false;
-    let ws: WebSocket | null = null;
+    let ws: DshWebSocketLike | null = null;
     let receivedFrame: string | undefined;
 
     const finish = (result: DshWsTestResult) => {
@@ -328,7 +330,7 @@ export function testDshWebSocket(
     }, 15000);
 
     try {
-      ws = new WebSocket(wsUrl);
+      ws = createDshWebSocket(wsUrl);
     } catch (err) {
       finish({
         ok: false,
@@ -480,6 +482,8 @@ function extractTextParts(content: unknown): string {
 interface FollowParsedEvent {
   isSnapshot?: boolean;
   delta?: string;
+  reasoningDelta?: string;
+  toolStep?: AgentToolStep;
   fullText?: string;
   done?: boolean;
   idleSignal?: boolean;
@@ -508,6 +512,37 @@ function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent
       if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
         return { delta: chunk.text };
       }
+      if (
+        (chunk.type === 'reasoning-delta' || chunk.type === 'reasoning' || chunk.type === 'thinking-delta') &&
+        (typeof chunk.text === 'string' || typeof chunk.delta === 'string')
+      ) {
+        return { reasoningDelta: String(chunk.text ?? chunk.delta ?? '') };
+      }
+      if (
+        chunk.type === 'tool-call' ||
+        chunk.type === 'tool-input-start' ||
+        chunk.type === 'tool-call-start'
+      ) {
+        const name = String(chunk.toolName ?? chunk.name ?? 'tool');
+        const id = String(chunk.toolCallId ?? chunk.id ?? `${name}-${Date.now()}`);
+        const detail =
+          chunk.args || chunk.input
+            ? JSON.stringify(chunk.args ?? chunk.input).slice(0, 180)
+            : undefined;
+        return { toolStep: { id, name, status: 'running', detail } };
+      }
+      if (chunk.type === 'tool-result' || chunk.type === 'tool-output-available') {
+        const name = String(chunk.toolName ?? chunk.name ?? 'tool');
+        const id = String(chunk.toolCallId ?? chunk.id ?? name);
+        const output =
+          chunk.result || chunk.output
+            ? (typeof (chunk.result ?? chunk.output) === 'string'
+                ? String(chunk.result ?? chunk.output)
+                : JSON.stringify(chunk.result ?? chunk.output)
+              ).slice(0, 260)
+            : undefined;
+        return { toolStep: { id, name, status: 'done', output } };
+      }
       return {};
     }
     return {};
@@ -528,7 +563,7 @@ function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent
     (typeof inner.kind === 'string' && inner.kind) ||
     frameType;
 
-  // Never echo back user messages or tool input messages as assistant output
+  // Never echo back user messages as assistant output
   if (
     eventType.startsWith('user/') ||
     eventType === 'user' ||
@@ -538,7 +573,39 @@ function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent
     return {};
   }
 
-  // Assistant text streaming deltas
+  // Tool lifecycle events (top-level event format)
+  if (eventType.includes('tool')) {
+    const data =
+      inner.data && typeof inner.data === 'object' ? (inner.data as Record<string, unknown>) : inner;
+    const name = String(data.toolName ?? data.name ?? inner.name ?? 'tool');
+    const id = String(data.toolCallId ?? data.callId ?? data.id ?? `${name}-step`);
+    const isDone =
+      eventType.includes('result') ||
+      eventType.includes('end') ||
+      eventType.includes('done') ||
+      eventType.includes('complete');
+    const isErr = eventType.includes('error') || eventType.includes('fail');
+    const detail =
+      data.input || data.args ? JSON.stringify(data.input ?? data.args).slice(0, 180) : undefined;
+    const output =
+      data.output || data.result
+        ? (typeof (data.output ?? data.result) === 'string'
+            ? String(data.output ?? data.result)
+            : JSON.stringify(data.output ?? data.result)
+          ).slice(0, 260)
+        : undefined;
+    return {
+      toolStep: {
+        id,
+        name,
+        status: isErr ? 'error' : isDone ? 'done' : 'running',
+        detail,
+        output,
+      },
+    };
+  }
+
+  // Assistant text & reasoning streaming deltas
   if (
     eventType.includes('chunk') ||
     eventType.includes('delta') ||
@@ -548,7 +615,6 @@ function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent
     frameType === 'assistant-stream' ||
     frameType === 'delta'
   ) {
-    // Skip reasoning-only deltas
     if (
       inner.channel === 'reasoning' ||
       inner.partType === 'reasoning' ||
@@ -556,7 +622,11 @@ function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent
       eventType.includes('reasoning') ||
       eventType.includes('thinking')
     ) {
-      return {};
+      const rText =
+        (typeof inner.delta === 'string' && inner.delta) ||
+        (typeof inner.text === 'string' && inner.text) ||
+        '';
+      return rText ? { reasoningDelta: rText } : {};
     }
     const deltaObj =
       inner.delta && typeof inner.delta === 'object'
@@ -675,10 +745,10 @@ interface MultiplexerStreamHandlers {
 }
 
 class SingleTurnMuxHelper {
-  private ws: WebSocket;
+  private ws: DshWebSocketLike;
   private handlers = new Map<string, MultiplexerStreamHandlers>();
 
-  constructor(ws: WebSocket) {
+  constructor(ws: DshWebSocketLike) {
     this.ws = ws;
     this.ws.onmessage = (event) => {
       const raw = typeof event.data === 'string' ? event.data : '';
@@ -839,7 +909,7 @@ export async function listDshSessions(config: ConnectionConfig): Promise<RemoteS
   for (const args of wsCandidateArgs) {
     const items = await new Promise<RemoteSessionSummary[]>((resolve) => {
       let done = false;
-      let ws: WebSocket | null = null;
+      let ws: DshWebSocketLike | null = null;
       const localMap = new Map<string, RemoteSessionSummary>();
 
       const finish = () => {
@@ -859,7 +929,7 @@ export async function listDshSessions(config: ConnectionConfig): Promise<RemoteS
       const timer = window.setTimeout(finish, 3500);
 
       try {
-        ws = new WebSocket(wsUrl);
+        ws = createDshWebSocket(wsUrl);
       } catch {
         finish();
         return;
@@ -979,7 +1049,7 @@ export async function loadDshSessionHistory(
   if (wsUrl) {
     const fromWs = await new Promise<ChatMessage[]>((resolve) => {
       let done = false;
-      let ws: WebSocket | null = null;
+      let ws: DshWebSocketLike | null = null;
       let collected: ChatMessage[] = [];
 
       const finish = () => {
@@ -999,7 +1069,7 @@ export async function loadDshSessionHistory(
       const timer = window.setTimeout(finish, 3200);
 
       try {
-        ws = new WebSocket(wsUrl);
+        ws = createDshWebSocket(wsUrl);
       } catch {
         finish();
         return;
@@ -1178,11 +1248,29 @@ export function streamDshMuxReply(
     let settled = false;
     let diagnosingError = false;
     let accumulated = '';
-    let ws: WebSocket | null = null;
+    let accumulatedThinking = '';
+    const toolStepsMap = new Map<string, AgentToolStep>();
+    const startedAt = performance.now();
+    let ws: DshWebSocketLike | null = null;
     let mux: SingleTurnMuxHelper | null = null;
     let followStreamId: string | null = null;
     let sawPostPromptEvent = false;
     const recentRawFrames: string[] = [];
+
+    const emitUpdate = (done: boolean) => {
+      const { cleanText, cards } = extractRelayCards(accumulated);
+      const steps = Array.from(toolStepsMap.values()).map((s) =>
+        done && s.status === 'running' ? { ...s, status: 'done' as const } : s
+      );
+      onChunk({
+        text: done ? cleanText || accumulated || '（Agent 已完成本轮回复）' : cleanText,
+        cards,
+        thinking: accumulatedThinking || undefined,
+        toolSteps: steps.length > 0 ? steps : undefined,
+        elapsedMs: Math.round(performance.now() - startedAt),
+        done,
+      });
+    };
 
     const cleanup = () => {
       window.clearTimeout(connectTimer);
@@ -1248,7 +1336,7 @@ export function streamDshMuxReply(
     };
 
     try {
-      ws = new WebSocket(wsUrl);
+      ws = createDshWebSocket(wsUrl);
     } catch (err) {
       fail(new Error(`WebSocket 地址无效：${err instanceof Error ? err.message : wsUrl}`));
       return;
@@ -1352,22 +1440,30 @@ export function streamDshMuxReply(
                   fail(new Error(`Agent 执行出错：${info.error}`));
                   return;
                 }
+                if (info.reasoningDelta) {
+                  accumulatedThinking += info.reasoningDelta;
+                  emitUpdate(false);
+                }
+                if (info.toolStep) {
+                  const prev = toolStepsMap.get(info.toolStep.id);
+                  toolStepsMap.set(info.toolStep.id, {
+                    id: info.toolStep.id,
+                    name: info.toolStep.name || prev?.name || 'tool',
+                    status: info.toolStep.status,
+                    detail: info.toolStep.detail ?? prev?.detail,
+                    output: info.toolStep.output ?? prev?.output,
+                  });
+                  emitUpdate(false);
+                }
                 if (info.delta) {
                   accumulated += info.delta;
-                  const { cleanText, cards } = extractRelayCards(accumulated);
-                  onChunk({ text: cleanText, cards, done: false });
+                  emitUpdate(false);
                 } else if (info.fullText) {
                   accumulated = info.fullText;
-                  const { cleanText, cards } = extractRelayCards(accumulated);
-                  onChunk({ text: cleanText, cards, done: Boolean(info.done) });
+                  emitUpdate(Boolean(info.done));
                 }
                 if (info.done || (info.idleSignal && accumulated.length > 0)) {
-                  const { cleanText, cards } = extractRelayCards(accumulated);
-                  onChunk({
-                    text: cleanText || accumulated || '（Agent 已完成本轮回复）',
-                    cards,
-                    done: true,
-                  });
+                  emitUpdate(true);
                   succeed();
                   return;
                 }
@@ -1375,8 +1471,7 @@ export function streamDshMuxReply(
             },
             onEnd: () => {
               if (!settled && accumulated) {
-                const { cleanText, cards } = extractRelayCards(accumulated);
-                onChunk({ text: cleanText, cards, done: true });
+                emitUpdate(true);
                 succeed();
               }
             },

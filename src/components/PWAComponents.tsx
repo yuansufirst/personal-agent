@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Download, Smartphone, WifiOff, X } from 'lucide-react';
 import { usePWAInstall } from '../hooks/usePWAInstall';
 import { useOnlineStatus } from '../hooks/useOnlineStatus';
+import { isNativeApp } from '../services/nativeApp';
 
 interface PWAInstallButtonProps {
   compact?: boolean;
@@ -11,7 +12,7 @@ export const PWAInstallButton: React.FC<PWAInstallButtonProps> = ({ compact = fa
   const { isInstallable, isInstalled, isIOS, install } = usePWAInstall();
   const [showGuide, setShowGuide] = useState(false);
 
-  if (isInstalled) {
+  if (isInstalled || isNativeApp()) {
     return null;
   }
 

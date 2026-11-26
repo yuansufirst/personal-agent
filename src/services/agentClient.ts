@@ -1,5 +1,6 @@
 import { BRIEFING_IMAGES } from '../data/initialData';
 import type {
+  AgentToolStep,
   ChatAttachment,
   ChatMessage,
   ConnectionConfig,
@@ -14,6 +15,9 @@ import {
 export interface AgentReplyChunk {
   text: string;
   cards?: InteractiveCard[];
+  thinking?: string;
+  toolSteps?: AgentToolStep[];
+  elapsedMs?: number;
   done?: boolean;
 }
 

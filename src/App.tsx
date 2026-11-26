@@ -5,19 +5,19 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Bell,
-  BookOpen,
   Check,
-  Laptop,
+  Compass,
+  Hash,
   Link2,
   MessageSquare,
   Moon,
-  Network,
+  Pencil,
   Plus,
   RefreshCw,
-  Server,
-  Smartphone,
+  Search,
   Sun,
+  Target,
+  Trash2,
 } from 'lucide-react';
 import {
   DEFAULT_CONNECTION_CONFIG,
@@ -33,6 +33,7 @@ import type {
   ChatAttachment,
   ChatMessage,
   ConnectionConfig,
+  GoalItem,
   InteractiveCard,
   MeshFileItem,
   MeshNode,
@@ -48,11 +49,12 @@ import {
   resetDshSession,
 } from './services/dshMuxClient';
 import { ChatView } from './components/ChatView';
-import { BriefingsView } from './components/BriefingsView';
-import { MeshView } from './components/MeshView';
-import { RemindersView } from './components/RemindersView';
+import { GoalsView } from './components/GoalsView';
+import { SpaceView } from './components/SpaceView';
 import { ConnectionSheet } from './components/ConnectionSheet';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAComponents';
+import { registerAndroidBackHandler, syncNativeStatusBar } from './services/nativeApp';
+import museAvatar from './assets/images/muse_agent_avatar_1795671239700.jpg';
 
 const STORAGE_KEYS = {
   config: 'relay_connection_config_v2',
@@ -60,6 +62,7 @@ const STORAGE_KEYS = {
   activeSessionId: 'relay_active_session_v1',
   briefings: 'relay_briefings_v2',
   reminders: 'relay_reminders_v2',
+  goals: 'relay_goals_v1',
   nodes: 'relay_mesh_nodes_v2',
   theme: 'relay_theme_v1',
 };
@@ -98,6 +101,8 @@ function sanitizeSessionsForStorage(sessions: SessionRecord[]): SessionRecord[] 
     messages: s.messages.slice(-80).map((m) => ({
       ...m,
       streaming: false,
+      thinking: m.thinking ? m.thinking.slice(0, 4000) : undefined,
+      toolSteps: m.toolSteps?.slice(0, 20),
       attachments: m.attachments?.map((att) => ({
         name: att.name,
         size: att.size,
@@ -152,6 +157,10 @@ export default function App() {
     return '';
   });
 
+  const [goals, setGoals] = useState<GoalItem[]>(() =>
+    loadFromStorage(STORAGE_KEYS.goals, [])
+  );
+
   const [briefings, setBriefings] = useState<BriefingItem[]>(() => {
     const initialCfg = loadFromStorage(STORAGE_KEYS.config, DEFAULT_CONNECTION_CONFIG);
     return loadFromStorage(
@@ -186,6 +195,13 @@ export default function App() {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
+  // Desktop left-sidebar session helpers
+  const [sidebarSearch, setSidebarSearch] = useState('');
+  const [showSidebarBind, setShowSidebarBind] = useState(false);
+  const [sidebarBindInput, setSidebarBindInput] = useState('');
+  const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+
   const abortRef = useRef<AbortController | null>(null);
   const toastTimerRef = useRef<number | null>(null);
 
@@ -194,6 +210,16 @@ export default function App() {
   }, [sessions, activeSessionId]);
 
   const messages = activeSession.messages;
+
+  const filteredSidebarSessions = useMemo(() => {
+    const q = sidebarSearch.trim().toLowerCase();
+    if (!q) return sessions;
+    return sessions.filter(
+      (s) =>
+        s.title.toLowerCase().includes(q) ||
+        (s.remoteSessionId && s.remoteSessionId.toLowerCase().includes(q))
+    );
+  }, [sessions, sidebarSearch]);
 
   useEffect(() => {
     if (activeSession.id !== activeSessionId) {
@@ -204,7 +230,30 @@ export default function App() {
   useEffect(() => {
     document.documentElement.classList.toggle('dark', darkMode);
     localStorage.setItem(STORAGE_KEYS.theme, JSON.stringify(darkMode ? 'dark' : 'light'));
+    void syncNativeStatusBar(darkMode);
   }, [darkMode]);
+
+  useEffect(() => {
+    return registerAndroidBackHandler(() => {
+      if (connectionOpen) {
+        setConnectionOpen(false);
+        return true;
+      }
+      if (selectedBriefing) {
+        setSelectedBriefing(null);
+        return true;
+      }
+      if (previewFile) {
+        setPreviewFile(null);
+        return true;
+      }
+      if (activeTab !== 'chat') {
+        setActiveTab('chat');
+        return true;
+      }
+      return false;
+    });
+  }, [connectionOpen, selectedBriefing, previewFile, activeTab]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.config, JSON.stringify(config));
@@ -221,6 +270,10 @@ export default function App() {
       // Ignore quota errors
     }
   }, [sessions, activeSession.id]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.goals, JSON.stringify(goals));
+  }, [goals]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.briefings, JSON.stringify(briefings));
@@ -263,7 +316,7 @@ export default function App() {
         const remoteList = await listDshSessions(config);
         if (remoteList.length === 0) {
           if (!silent) {
-            showToast('未从云端拉取到历史会话，可在弹窗底部粘贴 Session ID 直接接入');
+            showToast('未从云端拉取到历史会话，可粘贴 Session ID 直接接入');
           }
           return;
         }
@@ -333,6 +386,7 @@ export default function App() {
     if (!target) return;
 
     setActiveSessionId(target.id);
+    setActiveTab('chat');
 
     if (
       config.mode === 'dsh-bridge' &&
@@ -374,6 +428,7 @@ export default function App() {
     const created = createEmptySession(clean);
     setSessions((prev) => [created, ...prev]);
     setActiveSessionId(created.id);
+    setActiveTab('chat');
     showToast(`已接入会话 ${clean.slice(0, 8)}`);
 
     if (config.mode === 'dsh-bridge') {
@@ -399,6 +454,16 @@ export default function App() {
     }
   };
 
+  const handleRenameSession = (sessionId: string, nextTitle: string) => {
+    const clean = nextTitle.trim();
+    if (clean) {
+      setSessions((prev) =>
+        prev.map((s) => (s.id === sessionId ? { ...s, title: clean } : s))
+      );
+    }
+    setRenamingSessionId(null);
+  };
+
   const handleDeleteSession = (targetId: string) => {
     setSessions((prev) => {
       if (prev.length <= 1) return prev;
@@ -417,6 +482,7 @@ export default function App() {
     const fresh = createEmptySession();
     setSessions((prev) => [fresh, ...prev]);
     setActiveSessionId(fresh.id);
+    setActiveTab('chat');
     showToast('已创建新会话');
   };
 
@@ -483,6 +549,9 @@ export default function App() {
                 ? {
                     ...m,
                     content: chunk.text,
+                    thinking: chunk.thinking ?? m.thinking,
+                    toolSteps: chunk.toolSteps ?? m.toolSteps,
+                    elapsedMs: chunk.elapsedMs ?? m.elapsedMs,
                     cards: chunk.cards ?? m.cards,
                     streaming: !chunk.done,
                   }
@@ -540,6 +609,57 @@ export default function App() {
     }
   };
 
+  // Goals handlers (Muse Pillar 2)
+  const handleAddGoal = (title: string, notes: string, milestones: string[]) => {
+    const newGoal: GoalItem = {
+      id: `goal-${Date.now()}`,
+      title,
+      notes: notes || undefined,
+      status: 'active',
+      updatedAt: nowTimeString(),
+      milestones: milestones.map((text, idx) => ({
+        id: `ms-${Date.now()}-${idx}`,
+        text,
+        done: false,
+      })),
+    };
+    setGoals((prev) => [newGoal, ...prev]);
+  };
+
+  const handleToggleMilestone = (goalId: string, milestoneId: string) => {
+    setGoals((prev) =>
+      prev.map((g) =>
+        g.id === goalId
+          ? {
+              ...g,
+              updatedAt: nowTimeString(),
+              milestones: g.milestones.map((m) =>
+                m.id === milestoneId ? { ...m, done: !m.done } : m
+              ),
+            }
+          : g
+      )
+    );
+  };
+
+  const handleDeleteGoal = (goalId: string) => {
+    setGoals((prev) => prev.filter((g) => g.id !== goalId));
+    showToast('已删除目标');
+  };
+
+  const handleDelegateGoal = (goal: GoalItem) => {
+    const remaining = goal.milestones.filter((m) => !m.done).map((m) => `- ${m.text}`);
+    const promptLines = [
+      `请帮我推进长期目标：「${goal.title}」`,
+      goal.notes ? `背景说明：${goal.notes}` : '',
+      remaining.length > 0 ? `当前未完成里程碑：\n${remaining.join('\n')}` : '',
+      '请先给出下一步最直接可执行的方案，需要你在云端或设备上直接执行的部分请告诉我。',
+    ].filter(Boolean);
+    setActiveTab('chat');
+    void handleSendMessage(promptLines.join('\n'));
+  };
+
+  // Briefings handlers
   const handleToggleSaveBriefing = (item: BriefingItem) => {
     const nextSaved = !item.saved;
     setBriefings((prev) => {
@@ -559,7 +679,7 @@ export default function App() {
         ),
       }))
     );
-    showToast(nextSaved ? '已收藏到简报页' : '已取消收藏');
+    showToast(nextSaved ? '已收藏到空间归档' : '已取消收藏');
   };
 
   const handleFetchFreshDigest = () => {
@@ -599,30 +719,14 @@ export default function App() {
   };
 
   const handleAskAboutBriefing = (item: BriefingItem) => {
+    setSelectedBriefing(null);
     setActiveTab('chat');
     void handleSendMessage(
       `请结合我的工作流深入解读这篇内容：《${item.title}》（${item.source}），并给出 2 条可执行建议。`
     );
   };
 
-  const handleSendBriefingToPC = (item: BriefingItem) => {
-    const newFile: MeshFileItem = {
-      id: `file-md-${Date.now()}`,
-      name: `${item.title.slice(0, 24).replace(/\s+/g, '_')}.md`,
-      size: '8.6 KB',
-      sourceNode: 'cloud',
-      targetNode: 'pc',
-      path: `D:/Workspace/Digests/${item.id}.md`,
-      updatedAt: '刚刚',
-      status: 'synced',
-      previewText: `# ${item.title}\n\n来源：${item.source}\n\n${item.summary}\n\n## 要点\n${item.takeaways
-        .map((t, i) => `${i + 1}. ${t}`)
-        .join('\n')}`,
-    };
-    setFiles((prev) => [newFile, ...prev]);
-    showToast('已将 Markdown 摘要同步至个人电脑工作目录');
-  };
-
+  // Reminders handlers
   const handleToggleReminderById = (id: string) => {
     setReminders((prev) =>
       prev.map((r) => (r.id === id ? { ...r, completed: !r.completed } : r))
@@ -661,7 +765,7 @@ export default function App() {
       if (prev.some((r) => r.id === item.id)) return prev;
       return [item, ...prev];
     });
-    showToast('已同步到「提醒」日程中心');
+    showToast('已同步到「目标」日程提醒');
   };
 
   const handleAddReminder = (item: Omit<ReminderItem, 'id' | 'completed'>) => {
@@ -676,6 +780,7 @@ export default function App() {
     showToast('已删除该提醒');
   };
 
+  // Approval card handler (preserves cloud-agent approval dispatch to dsh)
   const handleResolveApproval = (actionId: string, decision: 'approved' | 'rejected') => {
     const action = messages
       .flatMap((m) => m.cards ?? [])
@@ -711,6 +816,7 @@ export default function App() {
     }
   };
 
+  // Space / Environment handlers
   const handleUpdateNodeIp = (nodeId: string, newIp: string) => {
     setNodes((prev) =>
       prev.map((n) => (n.id === nodeId ? { ...n, tailscaleIp: newIp } : n))
@@ -729,7 +835,8 @@ export default function App() {
         ? `${Math.max(1, Math.round(file.size / 1024))} KB`
         : `${(file.size / (1024 * 1024)).toFixed(1)} MB`;
 
-    const isTextLike = file.type.startsWith('text/') || /\.(md|txt|json|csv|ts|py)$/i.test(file.name);
+    const isTextLike =
+      file.type.startsWith('text/') || /\.(md|txt|json|csv|ts|py)$/i.test(file.name);
 
     const finalize = (previewText?: string) => {
       const entry: MeshFileItem = {
@@ -745,7 +852,7 @@ export default function App() {
           previewText || '已加入设备网文件列表，可在对话中让云端 Agent 读取或处理。',
       };
       setFiles((prev) => [entry, ...prev]);
-      showToast(`已添加 ${file.name} 到设备网文件流`);
+      showToast(`已添加 ${file.name} 到文件归档`);
     };
 
     if (isTextLike && file.size < 200_000) {
@@ -759,12 +866,14 @@ export default function App() {
   };
 
   const handleAskAboutFile = (file: MeshFileItem) => {
+    setPreviewFile(null);
     setActiveTab('chat');
     void handleSendMessage(`请读取并总结设备网文件「${file.name}」（路径：${file.path}）的核心内容。`);
   };
 
-  const pendingTodayCount = reminders.filter((r) => !r.completed && r.dayGroup === 'today').length;
-  const todayReminders = reminders.filter((r) => r.dayGroup === 'today');
+  const pendingGoalsOrReminders =
+    reminders.filter((r) => !r.completed && r.dayGroup === 'today').length +
+    goals.filter((g) => g.status === 'active').length;
 
   const navItems: {
     key: TabKey;
@@ -772,84 +881,273 @@ export default function App() {
     Icon: React.ComponentType<{ className?: string }>;
   }[] = [
     { key: 'chat', label: '对话', Icon: MessageSquare },
-    { key: 'briefings', label: '简报', Icon: BookOpen },
-    { key: 'mesh', label: '设备', Icon: Network },
-    { key: 'reminders', label: '提醒', Icon: Bell },
+    { key: 'goals', label: '目标', Icon: Target },
+    { key: 'space', label: '空间', Icon: Compass },
   ];
 
   return (
-    <div className="flex h-dvh flex-col overflow-hidden bg-[#F6F7F9] text-slate-900 dark:bg-[#0B0E14] dark:text-slate-100 lg:flex-row">
-      {/* Desktop Left Navigation Rail */}
-      <aside className="hidden lg:flex lg:w-60 lg:shrink-0 lg:flex-col lg:justify-between border-r border-slate-200/90 bg-white px-4 py-5 dark:border-slate-800/90 dark:bg-[#10141D]">
-        <div>
-          <div className="flex items-center gap-2.5 px-2">
-            <img src="/icon.svg" alt="Relay" className="h-7 w-7 rounded-lg" />
-            <span className="text-lg font-bold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap shrink-0">
+    <div className="flex h-dvh flex-col overflow-hidden bg-[#F8F7F4] text-zinc-950 dark:bg-[#0E0F12] dark:text-zinc-100 lg:flex-row">
+      {/* Desktop Muse Left Navigation & Session Sidebar */}
+      <aside className="hidden lg:flex lg:w-[272px] lg:shrink-0 lg:flex-col border-r border-stone-200/80 bg-[#F3F1EC] dark:border-zinc-800/80 dark:bg-[#121318]">
+        {/* Brand + New Chat */}
+        <div className="flex items-center justify-between px-4 pt-5 pb-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <img
+              src={museAvatar}
+              alt="Relay"
+              className="h-8 w-8 shrink-0 rounded-full object-cover ring-1 ring-stone-300/70 dark:ring-zinc-700"
+            />
+            <span className="text-base font-semibold tracking-tight text-zinc-950 dark:text-zinc-50 whitespace-nowrap">
               Relay
             </span>
           </div>
-
-          <nav className="mt-7 space-y-1">
-            {navItems.map(({ key, label, Icon }) => {
-              const active = activeTab === key;
-              return (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => setActiveTab(key)}
-                  className={`flex min-h-[44px] w-full items-center justify-between rounded-xl px-3 py-2 text-sm font-medium transition-colors whitespace-nowrap ${
-                    active
-                      ? 'bg-blue-50 text-blue-700 dark:bg-blue-950/60 dark:text-blue-400'
-                      : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800/60 dark:hover:text-slate-100'
-                  }`}
-                >
-                  <span className="flex items-center gap-3">
-                    <Icon className="h-[18px] w-[18px]" />
-                    <span>{label}</span>
-                  </span>
-                  {key === 'reminders' && pendingTodayCount > 0 && (
-                    <span className="font-mono-tabular text-xs text-slate-500 dark:text-slate-400">
-                      {pendingTodayCount}
-                    </span>
-                  )}
-                </button>
-              );
-            })}
-          </nav>
+          <button
+            type="button"
+            onClick={handleNewSession}
+            aria-label="新建对话"
+            title="新建对话"
+            className="flex h-9 w-9 items-center justify-center rounded-xl border border-stone-200/90 bg-white text-zinc-700 transition-colors hover:border-[#1B6EF3]/50 hover:text-[#1B6EF3] dark:border-zinc-800 dark:bg-[#181A20] dark:text-zinc-200 dark:hover:border-blue-500/50 dark:hover:text-blue-400"
+          >
+            <Plus className="h-4 w-4" />
+          </button>
         </div>
 
-        <div className="space-y-2 border-t border-slate-100 pt-4 dark:border-slate-800/80">
+        {/* 3-Pillar Navigation */}
+        <nav className="px-3 pt-1 pb-3 space-y-0.5">
+          {navItems.map(({ key, label, Icon }) => {
+            const active = activeTab === key;
+            return (
+              <button
+                key={key}
+                type="button"
+                onClick={() => setActiveTab(key)}
+                className={`flex min-h-[42px] w-full items-center justify-between rounded-2xl px-3 py-2 text-[13px] font-medium transition-colors whitespace-nowrap ${
+                  active
+                    ? 'bg-white text-zinc-950 shadow-xs dark:bg-[#1C1F26] dark:text-zinc-50'
+                    : 'text-zinc-600 hover:bg-stone-200/60 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800/60 dark:hover:text-zinc-100'
+                }`}
+              >
+                <span className="flex items-center gap-2.5">
+                  <Icon
+                    className={`h-[17px] w-[17px] ${
+                      active ? 'text-[#1B6EF3] dark:text-blue-400' : ''
+                    }`}
+                  />
+                  <span>{label}</span>
+                </span>
+                {key === 'goals' && pendingGoalsOrReminders > 0 && (
+                  <span className="font-mono-tabular text-[11px] text-zinc-400">
+                    {pendingGoalsOrReminders}
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </nav>
+
+        {/* Searchable Session History */}
+        <div className="flex min-h-0 flex-1 flex-col border-t border-stone-200/70 px-3 pt-3.5 dark:border-zinc-800/70">
+          <div className="flex items-center justify-between px-1.5">
+            <span className="text-[11px] font-semibold tracking-wide text-zinc-400">
+              会话列表
+            </span>
+            <div className="flex items-center gap-0.5">
+              {config.mode === 'dsh-bridge' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setShowSidebarBind((v) => !v)}
+                    aria-label="按 Session ID 接入"
+                    title="按 Session ID 接入"
+                    className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+                      showSidebarBind
+                        ? 'bg-stone-200/90 text-[#1B6EF3] dark:bg-zinc-800 dark:text-blue-400'
+                        : 'text-zinc-400 hover:bg-stone-200/70 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-200'
+                    }`}
+                  >
+                    <Hash className="h-3.5 w-3.5" />
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleRefreshSessions(false)}
+                    disabled={isLoadingSessions}
+                    aria-label="同步云端会话"
+                    title="同步云端会话"
+                    className="flex h-7 w-7 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-stone-200/70 hover:text-[#1B6EF3] disabled:opacity-50 dark:hover:bg-zinc-800 dark:hover:text-blue-400"
+                  >
+                    <RefreshCw
+                      className={`h-3.5 w-3.5 ${isLoadingSessions ? 'animate-spin' : ''}`}
+                    />
+                  </button>
+                </>
+              )}
+            </div>
+          </div>
+
+          {showSidebarBind && config.mode === 'dsh-bridge' && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!sidebarBindInput.trim()) return;
+                void handleBindSessionId(sidebarBindInput);
+                setSidebarBindInput('');
+                setShowSidebarBind(false);
+              }}
+              className="mt-2 flex items-center gap-1.5"
+            >
+              <input
+                type="text"
+                value={sidebarBindInput}
+                onChange={(e) => setSidebarBindInput(e.target.value)}
+                placeholder="粘贴 Session ID…"
+                className="min-h-[34px] min-w-0 flex-1 rounded-xl border border-stone-200 bg-white px-2.5 font-mono-tabular text-[11px] text-zinc-900 placeholder:text-zinc-400 focus:border-[#1B6EF3] focus:outline-none dark:border-zinc-700 dark:bg-[#181A20] dark:text-zinc-100"
+              />
+              <button
+                type="submit"
+                disabled={!sidebarBindInput.trim()}
+                className="min-h-[34px] shrink-0 rounded-xl bg-zinc-950 px-2.5 text-[11px] font-medium text-white disabled:opacity-40 dark:bg-[#1B6EF3]"
+              >
+                接入
+              </button>
+            </form>
+          )}
+
+          {sessions.length > 3 && (
+            <div className="relative mt-2">
+              <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
+              <input
+                type="text"
+                value={sidebarSearch}
+                onChange={(e) => setSidebarSearch(e.target.value)}
+                placeholder="搜索会话…"
+                className="min-h-[34px] w-full rounded-xl border border-stone-200/80 bg-white/80 py-1 pr-2.5 pl-8 text-xs text-zinc-800 placeholder:text-zinc-400 focus:border-[#1B6EF3] focus:bg-white focus:outline-none dark:border-zinc-800 dark:bg-[#181A20] dark:text-zinc-100"
+              />
+            </div>
+          )}
+
+          <div className="mt-2 flex-1 overflow-y-auto space-y-0.5 pb-3">
+            {filteredSidebarSessions.map((s) => {
+              const isActive = s.id === activeSession.id && activeTab === 'chat';
+              const isRenaming = renamingSessionId === s.id;
+
+              return (
+                <div
+                  key={s.id}
+                  className={`group flex items-center justify-between gap-1.5 rounded-xl px-2.5 py-2 transition-colors ${
+                    isActive
+                      ? 'bg-white text-zinc-950 shadow-xs dark:bg-[#1C1F26] dark:text-zinc-50'
+                      : 'text-zinc-600 hover:bg-stone-200/55 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800/50 dark:hover:text-zinc-100'
+                  }`}
+                >
+                  {isRenaming ? (
+                    <div className="flex min-w-0 flex-1 items-center gap-1">
+                      <input
+                        type="text"
+                        autoFocus
+                        value={renameDraft}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleRenameSession(s.id, renameDraft);
+                          if (e.key === 'Escape') setRenamingSessionId(null);
+                        }}
+                        onBlur={() => handleRenameSession(s.id, renameDraft)}
+                        className="min-w-0 flex-1 rounded-lg border border-[#1B6EF3] bg-[#F8F7F4] px-2 py-0.5 text-xs text-zinc-900 focus:outline-none dark:bg-[#0E0F12] dark:text-zinc-100"
+                      />
+                      <button
+                        type="button"
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          handleRenameSession(s.id, renameDraft);
+                        }}
+                        aria-label="保存名称"
+                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[#1B6EF3] text-white"
+                      >
+                        <Check className="h-3 w-3" />
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => void handleSelectSession(s.id)}
+                        className="min-w-0 flex-1 text-left"
+                      >
+                        <div className="truncate text-xs font-medium">{s.title}</div>
+                        <div className="mt-0.5 font-mono-tabular text-[10px] text-zinc-400">
+                          {s.source === 'remote' ? '云端' : '本地'} · {s.updatedAt}
+                        </div>
+                      </button>
+
+                      <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setRenamingSessionId(s.id);
+                            setRenameDraft(s.title);
+                          }}
+                          aria-label="重命名会话"
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-400 hover:bg-stone-200/80 hover:text-zinc-800 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+                        >
+                          <Pencil className="h-3 w-3" />
+                        </button>
+                        {sessions.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteSession(s.id);
+                            }}
+                            aria-label="删除会话"
+                            className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-400 hover:bg-stone-200/80 hover:text-rose-600 dark:hover:bg-zinc-700 dark:hover:text-rose-400"
+                          >
+                            <Trash2 className="h-3 w-3" />
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Bottom Utility Dock */}
+        <div className="space-y-2 border-t border-stone-200/70 p-3 dark:border-zinc-800/70">
           <button
             type="button"
             onClick={() => setConnectionOpen(true)}
-            className="flex min-h-[42px] w-full items-center gap-2.5 rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-800 dark:text-slate-300 dark:hover:bg-slate-800/70"
+            className="flex min-h-[40px] w-full items-center gap-2.5 rounded-2xl border border-stone-200/90 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition-colors hover:border-stone-300 dark:border-zinc-800 dark:bg-[#181A20] dark:text-zinc-300 dark:hover:border-zinc-700"
           >
-            <Link2 className="h-4 w-4 text-blue-600 dark:text-blue-400 shrink-0" />
+            <Link2 className="h-3.5 w-3.5 text-[#1B6EF3] dark:text-blue-400 shrink-0" />
             <span className="truncate">
-              {config.mode === 'sandbox' ? '连接配置 · 体验模式' : '已配置 Tailscale 通道'}
+              {config.mode === 'sandbox' ? '连接配置 · 体验模式' : 'Tailscale 云端通道'}
             </span>
           </button>
 
-          <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setDarkMode((prev) => !prev)}
-              className="flex min-h-[42px] flex-1 items-center justify-center gap-2 rounded-xl border border-slate-200 px-3 py-2 text-xs font-medium text-slate-700 transition-colors hover:bg-slate-50 dark:border-slate-800 dark:text-slate-300 dark:hover:bg-slate-800/70 whitespace-nowrap"
-            >
-              {darkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-              <span>{darkMode ? '浅色模式' : '深色模式'}</span>
-            </button>
-          </div>
+          <button
+            type="button"
+            onClick={() => setDarkMode((prev) => !prev)}
+            className="flex min-h-[38px] w-full items-center justify-center gap-2 rounded-2xl px-3 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-stone-200/60 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100 whitespace-nowrap"
+          >
+            {darkMode ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
+            <span>{darkMode ? '切换浅色外观' : '切换深色外观'}</span>
+          </button>
 
           <PWAInstallButton />
         </div>
       </aside>
 
       {/* Mobile Compact Top Header (52px) */}
-      <header className="flex h-[52px] shrink-0 items-center justify-between border-b border-slate-200/80 bg-white/90 px-4 backdrop-blur-md dark:border-slate-800/80 dark:bg-[#10141D]/90 lg:hidden">
-        <div className="flex items-center gap-2">
-          <img src="/icon.svg" alt="Relay" className="h-6 w-6 rounded-md" />
-          <span className="text-base font-bold tracking-tight text-slate-900 dark:text-slate-100 whitespace-nowrap shrink-0">
+      <header className="flex h-[52px] shrink-0 items-center justify-between border-b border-stone-200/80 bg-[#F8F7F4]/95 px-4 backdrop-blur-md dark:border-zinc-800/80 dark:bg-[#0E0F12]/95 lg:hidden">
+        <div className="flex items-center gap-2.5">
+          <img
+            src={museAvatar}
+            alt="Relay"
+            className="h-7 w-7 rounded-full object-cover ring-1 ring-stone-200 dark:ring-zinc-700"
+          />
+          <span className="text-base font-semibold tracking-tight text-zinc-950 dark:text-zinc-50 whitespace-nowrap shrink-0">
             Relay
           </span>
         </div>
@@ -859,14 +1157,14 @@ export default function App() {
             type="button"
             onClick={() => setDarkMode((prev) => !prev)}
             aria-label="切换深浅色主题"
-            className="flex h-10 w-10 items-center justify-center rounded-xl text-slate-600 hover:bg-slate-100 dark:text-slate-300 dark:hover:bg-slate-800"
+            className="flex h-10 w-10 items-center justify-center rounded-xl text-zinc-600 hover:bg-stone-200/60 dark:text-zinc-300 dark:hover:bg-zinc-800"
           >
             {darkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
           </button>
           <button
             type="button"
             onClick={() => setConnectionOpen(true)}
-            className="inline-flex h-10 items-center gap-1.5 rounded-xl bg-slate-900 px-3 text-xs font-medium text-white dark:bg-blue-600 whitespace-nowrap shrink-0"
+            className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-zinc-950 px-3 text-xs font-medium text-white dark:bg-[#1B6EF3] whitespace-nowrap shrink-0"
           >
             <Link2 className="h-3.5 w-3.5" />
             <span>连接</span>
@@ -874,7 +1172,7 @@ export default function App() {
         </div>
       </header>
 
-      {/* Center Workspace */}
+      {/* Spacious Center Stage (No Cramped Right Sidebar) */}
       <main className="min-h-0 flex-1 overflow-y-auto">
         {activeTab === 'chat' && (
           <div className="h-full pb-[60px] lg:pb-0">
@@ -897,7 +1195,7 @@ export default function App() {
               onToggleSaveBriefing={handleToggleSaveBriefing}
               onOpenBriefing={(item) => {
                 setSelectedBriefing(item);
-                setActiveTab('briefings');
+                setActiveTab('space');
               }}
               onAskAboutBriefing={handleAskAboutBriefing}
               onToggleReminder={(item) => handleToggleReminderById(item.id)}
@@ -906,7 +1204,7 @@ export default function App() {
               onResolveApproval={handleResolveApproval}
               onPreviewFile={(file) => {
                 setPreviewFile(file);
-                setActiveTab('mesh');
+                setActiveTab('space');
               }}
               onAskAboutFile={handleAskAboutFile}
               onShowToast={showToast}
@@ -914,37 +1212,15 @@ export default function App() {
           </div>
         )}
 
-        {activeTab === 'briefings' && (
-          <BriefingsView
-            items={briefings}
-            onToggleSave={handleToggleSaveBriefing}
-            onFetchFreshDigest={handleFetchFreshDigest}
-            onAskAgent={handleAskAboutBriefing}
-            onSendToPC={handleSendBriefingToPC}
-            selectedBriefing={selectedBriefing}
-            onSelectBriefing={setSelectedBriefing}
-            isFetching={isFetchingDigest}
-          />
-        )}
-
-        {activeTab === 'mesh' && (
-          <MeshView
-            nodes={nodes}
-            onUpdateNodeIp={handleUpdateNodeIp}
-            macros={QUICK_MACROS}
-            onRunMacro={handleRunMacro}
-            files={files}
-            onUploadLocalFile={handleUploadLocalFile}
-            onAskAboutFile={handleAskAboutFile}
-            previewFile={previewFile}
-            onSelectPreviewFile={setPreviewFile}
-          />
-        )}
-
-        {activeTab === 'reminders' && (
-          <RemindersView
+        {activeTab === 'goals' && (
+          <GoalsView
+            goals={goals}
             reminders={reminders}
             config={config}
+            onAddGoal={handleAddGoal}
+            onToggleMilestone={handleToggleMilestone}
+            onDeleteGoal={handleDeleteGoal}
+            onDelegateGoal={handleDelegateGoal}
             onAddReminder={handleAddReminder}
             onToggleReminder={handleToggleReminderById}
             onSnoozeReminder={handleSnoozeReminderById}
@@ -952,167 +1228,35 @@ export default function App() {
             onShowToast={showToast}
           />
         )}
+
+        {activeTab === 'space' && (
+          <SpaceView
+            config={config}
+            nodes={nodes}
+            macros={QUICK_MACROS}
+            files={files}
+            briefings={briefings}
+            selectedBriefing={selectedBriefing}
+            previewFile={previewFile}
+            isFetchingDigest={isFetchingDigest}
+            onOpenConnection={() => setConnectionOpen(true)}
+            onUpdateNodeIp={handleUpdateNodeIp}
+            onRunMacro={handleRunMacro}
+            onUploadLocalFile={handleUploadLocalFile}
+            onAskAboutFile={handleAskAboutFile}
+            onSelectPreviewFile={setPreviewFile}
+            onFetchFreshDigest={handleFetchFreshDigest}
+            onToggleSaveBriefing={handleToggleSaveBriefing}
+            onSelectBriefing={setSelectedBriefing}
+            onAskAboutBriefing={handleAskAboutBriefing}
+          />
+        )}
       </main>
 
-      {/* Desktop Right Context Panel: Session Switcher + Mesh + Real Reminders */}
-      {activeTab === 'chat' && (
-        <aside className="hidden xl:flex xl:w-80 xl:shrink-0 xl:flex-col border-l border-slate-200/90 bg-white/70 px-5 py-5 overflow-y-auto dark:border-slate-800/90 dark:bg-[#10141D]/70 space-y-6">
-          {/* Sessions List */}
-          <div>
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                会话列表
-              </h2>
-              <div className="flex items-center gap-1">
-                {config.mode === 'dsh-bridge' && (
-                  <button
-                    type="button"
-                    onClick={() => void handleRefreshSessions(false)}
-                    disabled={isLoadingSessions}
-                    aria-label="刷新云端会话"
-                    className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-blue-600 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-blue-400"
-                  >
-                    <RefreshCw
-                      className={`h-3.5 w-3.5 ${isLoadingSessions ? 'animate-spin' : ''}`}
-                    />
-                  </button>
-                )}
-                <button
-                  type="button"
-                  onClick={handleNewSession}
-                  aria-label="新建会话"
-                  className="flex h-7 w-7 items-center justify-center rounded-lg text-slate-500 hover:bg-slate-100 hover:text-blue-600 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-blue-400"
-                >
-                  <Plus className="h-3.5 w-3.5" />
-                </button>
-              </div>
-            </div>
-            <div className="mt-3 divide-y divide-slate-100 rounded-2xl border border-slate-200/80 bg-white dark:divide-slate-800/80 dark:border-slate-800 dark:bg-[#131822]">
-              {sessions.slice(0, 12).map((s) => {
-                const isActive = s.id === activeSession.id;
-                return (
-                  <button
-                    key={s.id}
-                    type="button"
-                    onClick={() => void handleSelectSession(s.id)}
-                    className={`flex w-full items-center justify-between gap-2 px-3.5 py-2.5 text-left transition-colors first:rounded-t-2xl last:rounded-b-2xl ${
-                      isActive
-                        ? 'bg-blue-50/70 text-blue-700 dark:bg-blue-950/40 dark:text-blue-300'
-                        : 'hover:bg-slate-50 dark:hover:bg-slate-800/50'
-                    }`}
-                  >
-                    <div className="min-w-0">
-                      <div className="truncate text-xs font-medium">{s.title}</div>
-                      <div className="mt-0.5 font-mono-tabular text-[11px] text-slate-400">
-                        {s.source === 'remote' ? '云端' : '本地'} · {s.updatedAt}
-                      </div>
-                    </div>
-                    {isActive && (
-                      <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Tailscale Mesh Quick Overview */}
-          <div>
-            <div className="flex items-center justify-between">
-              <h2 className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                Tailscale 设备网
-              </h2>
-              <button
-                type="button"
-                onClick={() => setActiveTab('mesh')}
-                className="text-xs font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400"
-              >
-                管理
-              </button>
-            </div>
-            <div className="mt-3 divide-y divide-slate-100 rounded-2xl border border-slate-200/80 bg-white dark:divide-slate-800/80 dark:border-slate-800 dark:bg-[#131822]">
-              {nodes.map((node) => {
-                const Icon =
-                  node.role === 'cloud'
-                    ? Server
-                    : node.role === 'pc'
-                      ? Laptop
-                      : Smartphone;
-                return (
-                  <div key={node.id} className="flex items-center gap-2.5 px-3.5 py-3">
-                    <Icon className="h-4 w-4 shrink-0 text-slate-500 dark:text-slate-400" />
-                    <div className="min-w-0">
-                      <div className="truncate text-xs font-medium text-slate-900 dark:text-slate-100">
-                        {node.name}
-                      </div>
-                      <div className="truncate font-mono-tabular text-[11px] text-slate-500 dark:text-slate-400">
-                        {node.tailscaleIp}
-                      </div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-
-          {/* Real Reminders (only shown when user has reminders) */}
-          {todayReminders.length > 0 && (
-            <div>
-              <div className="flex items-center justify-between">
-                <h2 className="text-xs font-semibold text-slate-900 dark:text-slate-100">
-                  今日待办提醒
-                </h2>
-                <button
-                  type="button"
-                  onClick={() => setActiveTab('reminders')}
-                  className="text-xs font-medium text-blue-600 hover:text-blue-700 dark:text-blue-400"
-                >
-                  全部
-                </button>
-              </div>
-              <div className="mt-3 divide-y divide-slate-100 rounded-2xl border border-slate-200/80 bg-white dark:divide-slate-800/80 dark:border-slate-800 dark:bg-[#131822]">
-                {todayReminders.slice(0, 4).map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={() => handleToggleReminderById(item.id)}
-                    className="flex w-full items-start gap-2.5 px-3.5 py-3 text-left hover:bg-slate-50 dark:hover:bg-slate-800/50 transition-colors"
-                  >
-                    <span
-                      className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border ${
-                        item.completed
-                          ? 'border-emerald-600 bg-emerald-600 text-white'
-                          : 'border-slate-300 dark:border-slate-600'
-                      }`}
-                    >
-                      {item.completed && <Check className="h-3 w-3" />}
-                    </span>
-                    <div className="min-w-0">
-                      <div
-                        className={`text-xs font-medium leading-snug ${
-                          item.completed
-                            ? 'text-slate-400 line-through'
-                            : 'text-slate-800 dark:text-slate-200'
-                        }`}
-                      >
-                        {item.title}
-                      </div>
-                      <div className="mt-0.5 font-mono-tabular text-[11px] text-slate-400">
-                        {item.dueLabel}
-                      </div>
-                    </div>
-                  </button>
-                ))}
-              </div>
-            </div>
-          )}
-        </aside>
-      )}
-
-      {/* Mobile Fixed Bottom Tab Bar (60px, Thumb Zone Ergonomics) */}
+      {/* Mobile Fixed 3-Pillar Bottom Tab Bar (60px, Thumb Zone Ergonomics) */}
       <nav
         aria-label="主导航"
-        className="fixed bottom-0 left-0 right-0 z-40 grid h-[60px] grid-cols-4 items-center border-t border-slate-200/90 bg-white/95 pb-safe backdrop-blur-md dark:border-slate-800/90 dark:bg-[#10141D]/95 lg:hidden"
+        className="fixed bottom-0 left-0 right-0 z-40 grid h-[60px] grid-cols-3 items-center border-t border-stone-200/90 bg-[#F8F7F4]/95 pb-safe backdrop-blur-md dark:border-zinc-800/90 dark:bg-[#0E0F12]/95 lg:hidden"
       >
         {navItems.map(({ key, label, Icon }) => {
           const active = activeTab === key;
@@ -1123,8 +1267,8 @@ export default function App() {
               onClick={() => setActiveTab(key)}
               className={`flex h-full min-h-[44px] flex-col items-center justify-center gap-0.5 transition-colors ${
                 active
-                  ? 'text-blue-600 dark:text-blue-400'
-                  : 'text-slate-500 dark:text-slate-400'
+                  ? 'text-[#1B6EF3] dark:text-blue-400'
+                  : 'text-zinc-500 dark:text-zinc-400'
               }`}
             >
               <Icon className="h-5 w-5" />
@@ -1162,7 +1306,7 @@ export default function App() {
       {toast && (
         <div
           role="status"
-          className="fixed top-16 left-1/2 z-50 -translate-x-1/2 rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-medium text-white shadow-lg dark:bg-slate-100 dark:text-slate-900 lg:top-5 whitespace-nowrap"
+          className="fixed top-16 left-1/2 z-50 -translate-x-1/2 rounded-2xl bg-zinc-950 px-4 py-2.5 text-xs font-medium text-white shadow-lg dark:bg-zinc-100 dark:text-zinc-950 lg:top-5 whitespace-nowrap"
         >
           {toast}
         </div>

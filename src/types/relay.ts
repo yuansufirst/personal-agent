@@ -1,4 +1,4 @@
-export type TabKey = 'chat' | 'briefings' | 'mesh' | 'reminders';
+export type TabKey = 'chat' | 'goals' | 'space';
 
 export type ConnectionMode = 'sandbox' | 'dsh-bridge' | 'openai-compatible';
 
@@ -41,6 +41,21 @@ export interface ReminderItem {
   channel: 'app' | 'browser' | 'ntfy';
   completed: boolean;
   note?: string;
+}
+
+export interface GoalMilestone {
+  id: string;
+  text: string;
+  done: boolean;
+}
+
+export interface GoalItem {
+  id: string;
+  title: string;
+  notes?: string;
+  status: 'active' | 'paused' | 'completed';
+  milestones: GoalMilestone[];
+  updatedAt: string;
 }
 
 export interface ApprovalAction {
@@ -99,6 +114,14 @@ export interface ChatAttachment {
   textContent?: string;
 }
 
+export interface AgentToolStep {
+  id: string;
+  name: string;
+  status: 'running' | 'done' | 'error';
+  detail?: string;
+  output?: string;
+}
+
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant';
@@ -106,6 +129,9 @@ export interface ChatMessage {
   timestamp: string;
   attachments?: ChatAttachment[];
   cards?: InteractiveCard[];
+  thinking?: string;
+  toolSteps?: AgentToolStep[];
+  elapsedMs?: number;
   streaming?: boolean;
   commandUsed?: string;
 }

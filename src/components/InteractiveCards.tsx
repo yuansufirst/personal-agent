@@ -87,7 +87,7 @@ export const InteractiveCardRenderer: React.FC<InteractiveCardRendererProps> = (
   if (card.type === 'briefing') {
     const item = card.data;
     return (
-      <div className="overflow-hidden rounded-2xl border border-slate-200/90 bg-white transition-colors dark:border-slate-800 dark:bg-[#131822]">
+      <div className="overflow-hidden rounded-2xl border border-stone-200/80 bg-white transition-colors dark:border-zinc-800 dark:bg-[#15171C]">
         {item.imageUrl && (
           <ResilientCardImage
             src={item.imageUrl}
@@ -188,7 +188,7 @@ export const InteractiveCardRenderer: React.FC<InteractiveCardRendererProps> = (
   if (card.type === 'reminder') {
     const item = card.data;
     return (
-      <div className="rounded-2xl border border-slate-200/90 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-[#131822]">
+      <div className="rounded-3xl border border-stone-200/80 bg-white p-4 sm:p-5 dark:border-zinc-800 dark:bg-[#15171C]">
         <div className="flex items-start gap-3">
           <button
             type="button"
@@ -265,7 +265,7 @@ export const InteractiveCardRenderer: React.FC<InteractiveCardRendererProps> = (
   if (card.type === 'approval') {
     const item: ApprovalAction = card.data;
     return (
-      <div className="rounded-2xl border border-slate-200/90 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-[#131822]">
+      <div className="rounded-3xl border border-stone-200/80 bg-white p-4 sm:p-5 dark:border-zinc-800 dark:bg-[#15171C]">
         <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
           <div className="flex items-center gap-2 text-slate-500 dark:text-slate-400">
             <Terminal className="h-3.5 w-3.5 text-slate-500" />
@@ -340,7 +340,7 @@ export const InteractiveCardRenderer: React.FC<InteractiveCardRendererProps> = (
   // File card
   const file = card.data;
   return (
-    <div className="rounded-2xl border border-slate-200/90 bg-white p-4 sm:p-5 dark:border-slate-800 dark:bg-[#131822]">
+    <div className="rounded-3xl border border-stone-200/80 bg-white p-4 sm:p-5 dark:border-zinc-800 dark:bg-[#15171C]">
       <div className="flex items-start gap-3">
         <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-slate-100 text-slate-700 dark:bg-slate-800 dark:text-slate-200">
           <FileText className="h-5 w-5" />

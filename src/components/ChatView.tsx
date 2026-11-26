@@ -1,17 +1,18 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  ArrowUp,
   Check,
   ChevronDown,
+  Copy,
   FileText,
   Image as ImageIcon,
   Loader2,
-  MessageSquare,
   Mic,
   MicOff,
   Paperclip,
   Plus,
   RefreshCw,
-  Send,
+  Search,
   Square,
   Trash2,
   X,
@@ -27,11 +28,14 @@ import type {
 } from '../types/relay';
 import { SLASH_COMMANDS } from '../data/initialData';
 import { InteractiveCardRenderer } from './InteractiveCards';
+import { MarkdownMessage } from './MarkdownMessage';
+import { AgentTraceBlock } from './AgentTraceBlock';
+import museAvatar from '../assets/images/muse_agent_avatar_1795671239700.jpg';
 
 interface ChatViewProps {
   messages: ChatMessage[];
   sessions: SessionRecord[];
-  activeSession: SessionRecord;
+  activeSession?: SessionRecord;
   isLoadingSessions: boolean;
   isLoadingHistory: boolean;
   config: ConnectionConfig;
@@ -63,7 +67,8 @@ const SANDBOX_QUICK_STARTERS = [
   '开启手机专注静音',
 ];
 
-const TEXT_FILE_REGEX = /\.(txt|md|markdown|json|csv|tsv|log|yaml|yml|toml|xml|html|css|js|ts|tsx|jsx|py|sh|bash|go|rs|java|c|cpp|h|sql|ini|conf|env)$/i;
+const TEXT_FILE_REGEX =
+  /\.(txt|md|markdown|json|csv|tsv|log|yaml|yml|toml|xml|html|css|js|ts|tsx|jsx|py|sh|bash|go|rs|java|c|cpp|h|sql|ini|conf|env)$/i;
 
 interface SpeechRecognitionAlternativeLike {
   transcript: string;
@@ -113,9 +118,11 @@ function readFileAsText(file: File): Promise<string> {
   });
 }
 
-async function compressImageIfNeeded(file: File, rawDataUrl: string): Promise<{ dataUrl: string; mimeType: string }> {
+async function compressImageIfNeeded(
+  file: File,
+  rawDataUrl: string
+): Promise<{ dataUrl: string; mimeType: string }> {
   const mime = file.type || 'image/jpeg';
-  // Keep small non-huge images untouched
   if (file.size <= 1_200_000 && mime !== 'image/bmp') {
     return { dataUrl: rawDataUrl, mimeType: mime };
   }
@@ -176,7 +183,6 @@ async function buildChatAttachment(file: File): Promise<ChatAttachment> {
     };
   }
 
-  // Binary non-image file (e.g. PDF)
   const rawDataUrl = await readFileAsDataUrl(file);
   const commaIdx = rawDataUrl.indexOf(',');
   const base64Data = commaIdx >= 0 ? rawDataUrl.slice(commaIdx + 1) : rawDataUrl;
@@ -216,16 +222,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onAskAboutFile,
   onShowToast,
 }) => {
+  const safeSession: SessionRecord = activeSession || {
+    id: 'fallback',
+    title: '新会话',
+    updatedAt: '',
+    source: 'local',
+    messages: [],
+  };
+
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [processingFiles, setProcessingFiles] = useState(false);
   const [listening, setListening] = useState(false);
   const [sessionSheetOpen, setSessionSheetOpen] = useState(false);
+  const [sessionSearch, setSessionSearch] = useState('');
   const [manualSessionInput, setManualSessionInput] = useState('');
+  const [copiedMsgId, setCopiedMsgId] = useState<string | null>(null);
   const [lightboxImage, setLightboxImage] = useState<{ src: string; name: string } | null>(null);
 
   const bottomRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
 
   const showSlashMenu = input.startsWith('/') && !input.includes(' ');
@@ -233,9 +250,26 @@ export const ChatView: React.FC<ChatViewProps> = ({
     ? SLASH_COMMANDS.filter((c) => c.cmd.startsWith(input.toLowerCase()))
     : [];
 
+  const filteredSheetSessions = useMemo(() => {
+    const q = sessionSearch.trim().toLowerCase();
+    if (!q) return sessions;
+    return sessions.filter(
+      (s) =>
+        s.title.toLowerCase().includes(q) ||
+        (s.remoteSessionId && s.remoteSessionId.toLowerCase().includes(q))
+    );
+  }, [sessions, sessionSearch]);
+
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, isStreaming]);
+
+  useEffect(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = 'auto';
+    el.style.height = `${Math.min(el.scrollHeight, 144)}px`;
+  }, [input]);
 
   const appendFiles = async (fileList: File[]) => {
     if (fileList.length === 0) return;
@@ -293,7 +327,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
     }
 
     onSendMessage(
-      trimmed || (attachments.some((a) => a.mimeType.startsWith('image/')) ? '请查看这张图片' : '请查看这些附件'),
+      trimmed ||
+        (attachments.some((a) => a.mimeType.startsWith('image/'))
+          ? '请查看这张图片'
+          : '请查看这些附件'),
       attachments.length > 0 ? attachments : undefined
     );
     setInput('');
@@ -304,6 +341,16 @@ export const ChatView: React.FC<ChatViewProps> = ({
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
       handleSubmit();
+    }
+  };
+
+  const handleCopyMessage = async (msgId: string, content: string) => {
+    try {
+      await navigator.clipboard.writeText(content);
+      setCopiedMsgId(msgId);
+      window.setTimeout(() => setCopiedMsgId((prev) => (prev === msgId ? null : prev)), 1800);
+    } catch {
+      onShowToast('复制失败，请手动长按选择文本');
     }
   };
 
@@ -321,7 +368,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
     const SpeechRec = win.SpeechRecognition || win.webkitSpeechRecognition;
 
     if (!SpeechRec) {
-      onShowToast('当前浏览器暂不支持语音转文字，可直接使用 Android 键盘语音输入');
+      onShowToast('当前浏览器暂不支持语音转文字，可直接使用系统键盘语音输入');
       return;
     }
 
@@ -363,46 +410,58 @@ export const ChatView: React.FC<ChatViewProps> = ({
     setSessionSheetOpen(false);
   };
 
-  const activeShortId = activeSession.remoteSessionId
-    ? activeSession.remoteSessionId.slice(0, 8)
+  const activeShortId = safeSession.remoteSessionId
+    ? safeSession.remoteSessionId.slice(0, 8)
     : undefined;
 
   return (
-    <div className="flex h-full flex-col">
-      {/* Compact Session & Channel Context Toolbar */}
-      <div className="flex items-center justify-between gap-2 border-b border-slate-200/80 bg-[#F6F7F9]/90 px-4 py-2 backdrop-blur-sm dark:border-slate-800/80 dark:bg-[#0B0E14]/90 sm:px-6">
+    <div className="relative flex h-full flex-col bg-[#F8F7F4] dark:bg-[#0E0F12]">
+      {/* Quiet Session Header Bar */}
+      <div className="flex items-center justify-between gap-2 border-b border-stone-200/70 bg-[#F8F7F4]/90 px-4 py-2 backdrop-blur-md dark:border-zinc-800/70 dark:bg-[#0E0F12]/90 sm:px-6">
         <button
           type="button"
           onClick={handleOpenSessionPicker}
-          className="flex min-h-[38px] min-w-0 items-center gap-1.5 rounded-xl px-2 py-1 text-left text-xs text-slate-700 transition-colors hover:bg-slate-200/60 dark:text-slate-200 dark:hover:bg-slate-800"
+          className="flex min-h-[38px] min-w-0 items-center gap-2 rounded-xl px-2 py-1 text-left transition-colors hover:bg-stone-200/60 dark:hover:bg-zinc-800/70"
         >
-          <MessageSquare className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
-          <span className="max-w-[160px] truncate font-medium sm:max-w-[260px]">
-            {activeSession.title}
+          <span className="max-w-[180px] truncate text-[13px] font-medium text-zinc-900 dark:text-zinc-100 sm:max-w-[320px]">
+            {safeSession.title}
           </span>
           {activeShortId && (
             <>
-              <span aria-hidden="true" className="text-slate-300 dark:text-slate-700">·</span>
-              <span className="font-mono-tabular text-[11px] text-slate-400">
+              <span aria-hidden="true" className="text-stone-300 dark:text-zinc-700">
+                ·
+              </span>
+              <span className="font-mono-tabular text-[11px] text-zinc-400">
                 {activeShortId}
               </span>
             </>
           )}
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-slate-400" />
+          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-zinc-400" />
         </button>
 
         <div className="flex items-center gap-1 shrink-0">
+          {config.mode === 'dsh-bridge' && (
+            <button
+              type="button"
+              onClick={onRefreshSessions}
+              disabled={isLoadingSessions}
+              aria-label="同步云端会话"
+              className="inline-flex h-9 w-9 items-center justify-center rounded-xl text-zinc-500 transition-colors hover:bg-stone-200/60 hover:text-zinc-900 disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+            >
+              <RefreshCw className={`h-3.5 w-3.5 ${isLoadingSessions ? 'animate-spin' : ''}`} />
+            </button>
+          )}
           <button
             type="button"
             onClick={onOpenConnection}
-            className="hidden sm:inline-flex min-h-[36px] items-center rounded-lg px-2.5 py-1.5 text-xs text-slate-500 transition-colors hover:bg-slate-200/60 hover:text-slate-900 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100 whitespace-nowrap"
+            className="hidden sm:inline-flex min-h-[36px] items-center rounded-xl px-2.5 py-1.5 text-xs text-zinc-500 transition-colors hover:bg-stone-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100 whitespace-nowrap"
           >
-            {config.mode === 'sandbox' ? '本地体验' : '通道配置'}
+            {config.mode === 'sandbox' ? '体验模式' : '通道配置'}
           </button>
           <button
             type="button"
             onClick={onNewSession}
-            className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-xs font-medium text-slate-600 transition-colors hover:bg-slate-200/60 hover:text-slate-900 dark:text-slate-300 dark:hover:bg-slate-800 dark:hover:text-slate-100 whitespace-nowrap shrink-0"
+            className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl px-2.5 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-stone-200/60 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50 whitespace-nowrap shrink-0 lg:hidden"
           >
             <Plus className="h-3.5 w-3.5" />
             <span>新会话</span>
@@ -410,34 +469,39 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       </div>
 
-      {/* Scrollable Message Stream */}
-      <div className="flex-1 overflow-y-auto px-4 py-5 sm:px-6">
-        <div className="mx-auto max-w-3xl space-y-6 pb-4">
+      {/* Editorial Message Stream */}
+      <div className="flex-1 overflow-y-auto px-4 pt-6 pb-8 sm:px-6">
+        <div className="mx-auto max-w-[740px] space-y-7 pb-4">
           {isLoadingHistory && messages.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-24 text-center text-slate-400">
-              <Loader2 className="h-5 w-5 animate-spin text-blue-600 dark:text-blue-400" />
-              <p className="mt-2.5 text-xs">正在同步云端会话记录...</p>
+            <div className="flex flex-col items-center justify-center py-28 text-center text-zinc-400">
+              <Loader2 className="h-5 w-5 animate-spin text-[#1B6EF3] dark:text-blue-400" />
+              <p className="mt-3 text-xs">正在同步云端会话记录…</p>
             </div>
           ) : messages.length === 0 ? (
-            <div className="flex flex-col items-center justify-center py-24 text-center">
-              <p className="text-sm font-medium text-slate-700 dark:text-slate-300">
-                {activeSession.remoteSessionId ? activeSession.title : '开始新对话'}
-              </p>
-              <p className="mt-1.5 text-xs text-slate-400 dark:text-slate-500">
+            <div className="flex flex-col items-center justify-center py-20 sm:py-28 text-center">
+              <img
+                src={museAvatar}
+                alt="Relay Agent"
+                className="h-16 w-16 rounded-full object-cover shadow-md ring-1 ring-stone-200/90 dark:ring-zinc-700/80"
+              />
+              <h2 className="mt-5 text-xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
+                {safeSession.remoteSessionId ? safeSession.title : '有什么可以帮你？'}
+              </h2>
+              <p className="mt-2 max-w-md text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
                 {config.mode === 'dsh-bridge'
-                  ? '直接输入指令、发送图片或文件，或点击上方切换已有云端会话'
+                  ? '直接输入指令、发送或粘贴图片与文档，也可以切换已有云端会话继续对话。'
                   : config.mode === 'openai-compatible'
-                    ? `当前模型 · ${config.model || 'custom'}`
-                    : '本地体验模式 · 可测试交互卡片或切换为真实通道'}
+                    ? `当前连接模型 · ${config.model || 'custom'}`
+                    : '当前为本地体验模式，可测试交互卡片或切换为 Tailscale 云端通道。'}
               </p>
             </div>
           ) : (
             messages.map((msg) => {
               const isUser = msg.role === 'user';
               return (
-                <div key={msg.id} className={isUser ? 'flex flex-col items-end' : 'space-y-3'}>
+                <div key={msg.id} className={isUser ? 'flex flex-col items-end' : 'group'}>
                   {isUser ? (
-                    <div className="max-w-[88%] sm:max-w-[78%] space-y-2">
+                    <div className="max-w-[88%] sm:max-w-[76%] space-y-2">
                       {msg.attachments && msg.attachments.length > 0 && (
                         <div className="flex flex-wrap justify-end gap-2">
                           {msg.attachments.map((att, idx) =>
@@ -446,22 +510,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
                                 key={idx}
                                 type="button"
                                 onClick={() => setLightboxImage({ src: att.dataUrl!, name: att.name })}
-                                className="overflow-hidden rounded-xl border border-slate-200/80 bg-white dark:border-slate-700"
+                                className="overflow-hidden rounded-2xl border border-stone-200/80 bg-white shadow-xs transition-transform hover:scale-[1.01] dark:border-zinc-700"
                               >
                                 <img
                                   src={att.dataUrl}
                                   alt={att.name}
-                                  className="max-h-48 max-w-[220px] object-cover"
+                                  className="max-h-52 max-w-[240px] object-cover"
                                 />
                               </button>
                             ) : (
                               <div
                                 key={idx}
-                                className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                                className="inline-flex items-center gap-2 rounded-2xl border border-stone-200/80 bg-white px-3 py-2 text-xs text-zinc-700 dark:border-zinc-800 dark:bg-[#15171C] dark:text-zinc-200"
                               >
-                                <FileText className="h-3.5 w-3.5 text-slate-400 shrink-0" />
-                                <span className="max-w-[160px] truncate">{att.name}</span>
-                                <span className="font-mono-tabular text-[11px] text-slate-400">
+                                <FileText className="h-3.5 w-3.5 text-zinc-400 shrink-0" />
+                                <span className="max-w-[160px] truncate font-medium">
+                                  {att.name}
+                                </span>
+                                <span className="font-mono-tabular text-[11px] text-zinc-400">
                                   {att.size}
                                 </span>
                               </div>
@@ -470,55 +536,81 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         </div>
                       )}
                       {msg.content && (
-                        <div className="rounded-2xl bg-slate-900 px-4 py-3 text-sm leading-relaxed text-white dark:bg-blue-600 whitespace-pre-wrap">
+                        <div className="rounded-3xl rounded-br-lg bg-zinc-900 px-4.5 py-3 text-[15px] leading-relaxed text-zinc-50 whitespace-pre-wrap dark:bg-[#1B6EF3] dark:text-white">
                           {msg.content}
                         </div>
                       )}
-                      <div className="text-right font-mono-tabular text-[11px] text-slate-400 dark:text-slate-500">
+                      <div className="pr-1 text-right font-mono-tabular text-[11px] text-zinc-400 dark:text-zinc-500">
                         {msg.timestamp}
                       </div>
                     </div>
                   ) : (
-                    <div className="space-y-3.5">
-                      <div className="flex items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
-                        <span className="font-semibold text-slate-900 dark:text-slate-100">
-                          Agent
-                        </span>
-                        <span aria-hidden="true">·</span>
-                        <span className="font-mono-tabular">{msg.timestamp}</span>
-                        {msg.streaming && (
-                          <>
+                    <div className="flex items-start gap-3 sm:gap-3.5">
+                      <img
+                        src={museAvatar}
+                        alt="Relay"
+                        className="mt-0.5 h-7 w-7 shrink-0 rounded-full object-cover ring-1 ring-stone-200/80 dark:ring-zinc-800"
+                      />
+                      <div className="min-w-0 flex-1 space-y-2.5">
+                        <div className="flex items-center justify-between gap-2">
+                          <div className="flex items-center gap-1.5 text-xs text-zinc-400">
+                            <span className="font-semibold text-zinc-900 dark:text-zinc-100">
+                              Relay
+                            </span>
                             <span aria-hidden="true">·</span>
-                            <span className="text-blue-600 dark:text-blue-400">正在响应</span>
-                          </>
+                            <span className="font-mono-tabular">{msg.timestamp}</span>
+                          </div>
+                          {msg.content && !msg.streaming && (
+                            <button
+                              type="button"
+                              onClick={() => void handleCopyMessage(msg.id, msg.content)}
+                              aria-label="复制回复内容"
+                              className="inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] text-zinc-400 opacity-75 transition-all hover:bg-stone-200/70 hover:text-zinc-800 sm:opacity-0 sm:group-hover:opacity-100 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                            >
+                              {copiedMsgId === msg.id ? (
+                                <>
+                                  <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
+                                  <span className="text-emerald-600 dark:text-emerald-400">已复制</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="h-3 w-3" />
+                                  <span>复制</span>
+                                </>
+                              )}
+                            </button>
+                          )}
+                        </div>
+
+                        <AgentTraceBlock
+                          thinking={msg.thinking}
+                          toolSteps={msg.toolSteps}
+                          elapsedMs={msg.elapsedMs}
+                          streaming={msg.streaming}
+                        />
+
+                        {msg.content && <MarkdownMessage content={msg.content} />}
+
+                        {msg.cards && msg.cards.length > 0 && (
+                          <div className="space-y-3 pt-1">
+                            {msg.cards.map((card, idx) => (
+                              <InteractiveCardRenderer
+                                key={`${msg.id}-card-${idx}`}
+                                card={card}
+                                onToggleSaveBriefing={onToggleSaveBriefing}
+                                onOpenBriefing={onOpenBriefing}
+                                onAskAboutBriefing={onAskAboutBriefing}
+                                onToggleReminder={onToggleReminder}
+                                onSnoozeReminder={onSnoozeReminder}
+                                onSyncReminder={onSyncReminder}
+                                onResolveApproval={onResolveApproval}
+                                onPreviewFile={onPreviewFile}
+                                onAskAboutFile={onAskAboutFile}
+                              />
+                            ))}
+                          </div>
                         )}
                       </div>
-
-                      {msg.content && (
-                        <div className="text-[15px] leading-7 text-slate-800 dark:text-slate-200 whitespace-pre-wrap">
-                          {msg.content}
-                        </div>
-                      )}
-
-                      {msg.cards && msg.cards.length > 0 && (
-                        <div className="space-y-3 pt-0.5">
-                          {msg.cards.map((card, idx) => (
-                            <InteractiveCardRenderer
-                              key={`${msg.id}-card-${idx}`}
-                              card={card}
-                              onToggleSaveBriefing={onToggleSaveBriefing}
-                              onOpenBriefing={onOpenBriefing}
-                              onAskAboutBriefing={onAskAboutBriefing}
-                              onToggleReminder={onToggleReminder}
-                              onSnoozeReminder={onSnoozeReminder}
-                              onSyncReminder={onSyncReminder}
-                              onResolveApproval={onResolveApproval}
-                              onPreviewFile={onPreviewFile}
-                              onAskAboutFile={onAskAboutFile}
-                            />
-                          ))}
-                        </div>
-                      )}
                     </div>
                   )}
                 </div>
@@ -529,24 +621,24 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       </div>
 
-      {/* Composer Area */}
-      <div className="border-t border-slate-200/80 bg-[#F6F7F9]/95 px-3 pt-2.5 pb-3 backdrop-blur-md dark:border-slate-800/80 dark:bg-[#0B0E14]/95 sm:px-6 sm:pb-4">
-        <div className="mx-auto max-w-3xl relative">
+      {/* Muse Floating Glass Composer Dock */}
+      <div className="bg-gradient-to-t from-[#F8F7F4] via-[#F8F7F4]/95 to-transparent px-3 pt-2 pb-3 dark:from-[#0E0F12] dark:via-[#0E0F12]/95 sm:px-6 sm:pb-5">
+        <div className="relative mx-auto max-w-[740px]">
           {/* Slash Command Picker */}
           {matchingCommands.length > 0 && (
-            <div className="absolute bottom-full left-0 right-0 mb-2 overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-lg dark:border-slate-800 dark:bg-[#131822]">
-              <div className="divide-y divide-slate-100 dark:divide-slate-800/80">
+            <div className="absolute bottom-full left-0 right-0 mb-2 overflow-hidden rounded-2xl border border-stone-200 bg-white shadow-lg dark:border-zinc-800 dark:bg-[#15171C]">
+              <div className="divide-y divide-stone-100 dark:divide-zinc-800/80">
                 {matchingCommands.map((item) => (
                   <button
                     key={item.cmd}
                     type="button"
                     onClick={() => setInput(`${item.cmd} `)}
-                    className="flex min-h-[44px] w-full items-center justify-between gap-3 px-4 py-2 text-left text-xs hover:bg-slate-50 dark:hover:bg-slate-800/60"
+                    className="flex min-h-[44px] w-full items-center justify-between gap-3 px-4 py-2 text-left text-xs hover:bg-stone-50 dark:hover:bg-zinc-800/60"
                   >
-                    <span className="font-mono-tabular font-semibold text-blue-600 dark:text-blue-400">
+                    <span className="font-mono-tabular font-semibold text-[#1B6EF3] dark:text-blue-400">
                       {item.cmd}
                     </span>
-                    <span className="truncate text-slate-500 dark:text-slate-400">{item.hint}</span>
+                    <span className="truncate text-zinc-500 dark:text-zinc-400">{item.hint}</span>
                   </button>
                 ))}
               </div>
@@ -555,13 +647,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
 
           {/* Quick Starters — ONLY shown in sandbox demo mode */}
           {config.mode === 'sandbox' && (
-            <div className="mb-2 flex items-center gap-1.5 overflow-x-auto pb-0.5">
+            <div className="mb-2.5 flex items-center gap-1.5 overflow-x-auto pb-0.5">
               {SANDBOX_QUICK_STARTERS.map((text) => (
                 <button
                   key={text}
                   type="button"
                   onClick={() => onSendMessage(text)}
-                  className="min-h-[34px] rounded-xl border border-slate-200/90 bg-white px-3 py-1 text-xs font-medium text-slate-700 transition-colors hover:border-blue-300 hover:text-blue-600 dark:border-slate-800 dark:bg-[#131822] dark:text-slate-300 dark:hover:border-blue-700 dark:hover:text-blue-400 whitespace-nowrap shrink-0"
+                  className="min-h-[34px] rounded-2xl border border-stone-200/90 bg-white px-3.5 py-1 text-xs font-medium text-zinc-700 transition-colors hover:border-[#1B6EF3]/50 hover:text-[#1B6EF3] dark:border-zinc-800 dark:bg-[#15171C] dark:text-zinc-300 dark:hover:border-blue-500/60 dark:hover:text-blue-400 whitespace-nowrap shrink-0"
                 >
                   {text}
                 </button>
@@ -569,22 +661,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </div>
           )}
 
-          {/* Pending Attachments (with real image thumbnails) */}
+          {/* Pending Attachments Strip */}
           {(attachments.length > 0 || processingFiles) && (
-            <div className="mb-2 flex flex-wrap items-center gap-2">
+            <div className="mb-2.5 flex flex-wrap items-center gap-2">
               {attachments.map((att, idx) => (
                 <div
                   key={`${att.name}-${idx}`}
-                  className="inline-flex items-center gap-2 rounded-xl border border-slate-200 bg-white p-1.5 pr-2.5 text-xs text-slate-700 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                  className="inline-flex items-center gap-2 rounded-2xl border border-stone-200 bg-white p-1.5 pr-2.5 text-xs text-zinc-700 shadow-xs dark:border-zinc-800 dark:bg-[#15171C] dark:text-zinc-200"
                 >
                   {att.mimeType.startsWith('image/') && att.dataUrl ? (
                     <img
                       src={att.dataUrl}
                       alt={att.name}
-                      className="h-9 w-9 rounded-lg object-cover shrink-0"
+                      className="h-9 w-9 rounded-xl object-cover shrink-0"
                     />
                   ) : (
-                    <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-slate-100 text-slate-500 dark:bg-slate-800 dark:text-slate-300 shrink-0">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-stone-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-300 shrink-0">
                       {att.mimeType.startsWith('image/') ? (
                         <ImageIcon className="h-4 w-4" />
                       ) : (
@@ -594,31 +686,31 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   )}
                   <div className="min-w-0">
                     <div className="max-w-[140px] truncate font-medium">{att.name}</div>
-                    <div className="font-mono-tabular text-[11px] text-slate-400">{att.size}</div>
+                    <div className="font-mono-tabular text-[11px] text-zinc-400">{att.size}</div>
                   </div>
                   <button
                     type="button"
                     onClick={() => setAttachments((prev) => prev.filter((_, i) => i !== idx))}
                     aria-label="移除附件"
-                    className="ml-0.5 flex h-6 w-6 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-100 hover:text-slate-700 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                    className="ml-0.5 flex h-6 w-6 items-center justify-center rounded-lg text-zinc-400 hover:bg-stone-100 hover:text-zinc-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
                   >
                     <X className="h-3.5 w-3.5" />
                   </button>
                 </div>
               ))}
               {processingFiles && (
-                <div className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-400">
+                <div className="inline-flex items-center gap-1.5 rounded-2xl border border-stone-200 bg-white px-3 py-2 text-xs text-zinc-500 dark:border-zinc-800 dark:bg-[#15171C] dark:text-zinc-400">
                   <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  <span>正在处理附件...</span>
+                  <span>正在处理附件…</span>
                 </div>
               )}
             </div>
           )}
 
-          {/* Main Input Bar */}
+          {/* Floating Glass Capsule Form */}
           <form
             onSubmit={handleSubmit}
-            className="flex items-end gap-1.5 rounded-2xl border border-slate-200 bg-white p-1.5 focus-within:border-blue-500 dark:border-slate-800 dark:bg-[#131822] dark:focus-within:border-blue-500"
+            className="flex items-end gap-1.5 rounded-3xl border border-stone-200/90 bg-white/95 p-2 shadow-[0_8px_30px_rgba(15,23,42,0.06)] transition-colors focus-within:border-[#1B6EF3]/70 dark:border-zinc-800 dark:bg-[#15171C]/95 dark:shadow-[0_8px_30px_rgba(0,0,0,0.35)] dark:focus-within:border-blue-500/70"
           >
             <input
               ref={fileInputRef}
@@ -632,32 +724,33 @@ export const ChatView: React.FC<ChatViewProps> = ({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               aria-label="上传图片或文件"
-              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl text-slate-500 transition-colors hover:bg-slate-100 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100"
+              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-stone-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
             >
-              <Paperclip className="h-5 w-5" />
+              <Paperclip className="h-[18px] w-[18px]" />
             </button>
 
             <textarea
+              ref={textareaRef}
               rows={1}
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder="发消息、粘贴图片，或输入 / 调用指令..."
-              className="max-h-32 min-h-[44px] flex-1 resize-none bg-transparent px-1.5 py-2.5 text-sm leading-relaxed text-slate-900 placeholder:text-slate-400 focus:outline-none dark:text-slate-100"
+              placeholder="发消息、粘贴图片，或输入 / 调用指令…"
+              className="max-h-36 min-h-[40px] flex-1 resize-none bg-transparent px-1.5 py-2 text-[15px] leading-relaxed text-zinc-900 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-100 dark:placeholder:text-zinc-500"
             />
 
             <button
               type="button"
               onClick={handleToggleVoice}
               aria-label={listening ? '停止语音输入' : '语音输入'}
-              className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-xl transition-colors ${
+              className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition-colors ${
                 listening
                   ? 'bg-rose-600 text-white'
-                  : 'text-slate-500 hover:bg-slate-100 hover:text-slate-800 dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100'
+                  : 'text-zinc-500 hover:bg-stone-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100'
               }`}
             >
-              {listening ? <MicOff className="h-5 w-5" /> : <Mic className="h-5 w-5" />}
+              {listening ? <MicOff className="h-[18px] w-[18px]" /> : <Mic className="h-[18px] w-[18px]" />}
             </button>
 
             {isStreaming ? (
@@ -665,47 +758,45 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 type="button"
                 onClick={onStopStreaming}
                 aria-label="停止生成"
-                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-slate-900 text-white transition-colors hover:bg-slate-800 dark:bg-slate-100 dark:text-slate-900"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-zinc-950 text-white transition-colors hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-950"
               >
-                <Square className="h-4 w-4 fill-current" />
+                <Square className="h-3.5 w-3.5 fill-current" />
               </button>
             ) : (
               <button
                 type="submit"
                 disabled={processingFiles || (!input.trim() && attachments.length === 0)}
                 aria-label="发送消息"
-                className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-600 text-white transition-colors hover:bg-blue-700 disabled:bg-slate-200 disabled:text-slate-400 dark:disabled:bg-slate-800 dark:disabled:text-slate-600"
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-zinc-950 text-white transition-colors hover:bg-[#1B6EF3] disabled:bg-stone-200 disabled:text-zinc-400 dark:bg-[#1B6EF3] dark:hover:bg-blue-600 dark:disabled:bg-zinc-800 dark:disabled:text-zinc-600"
               >
-                <Send className="h-4 w-4" />
+                <ArrowUp className="h-[18px] w-[18px]" />
               </button>
             )}
           </form>
         </div>
       </div>
 
-      {/* Session Picker Sheet */}
+      {/* Session Picker Sheet (Mobile & Quick Switch) */}
       {sessionSheetOpen && (
         <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-slate-950/55 backdrop-blur-xs sm:items-center sm:p-4"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/50 backdrop-blur-xs sm:items-center sm:p-4"
           onClick={() => setSessionSheetOpen(false)}
         >
           <div
-            className="flex max-h-[84vh] w-full max-w-md flex-col overflow-hidden rounded-t-3xl border border-slate-200/80 bg-white dark:border-slate-800 dark:bg-[#131822] sm:rounded-2xl"
+            className="flex max-h-[84vh] w-full max-w-md flex-col overflow-hidden rounded-t-3xl border border-stone-200/90 bg-white dark:border-zinc-800 dark:bg-[#15171C] sm:rounded-3xl"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="mx-auto mt-3 h-1.5 w-10 shrink-0 rounded-full bg-slate-300 dark:bg-slate-700 sm:hidden" />
+            <div className="mx-auto mt-3 h-1.5 w-10 shrink-0 rounded-full bg-stone-300 dark:bg-zinc-700 sm:hidden" />
 
-            <div className="flex items-center justify-between border-b border-slate-100 px-5 py-3.5 dark:border-slate-800/80">
-              <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                切换会话
-              </div>
+            <div className="flex items-center justify-between border-b border-stone-100 px-5 py-3.5 dark:border-zinc-800">
+              <div className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">切换会话</div>
               <div className="flex items-center gap-1">
                 {config.mode === 'dsh-bridge' && (
                   <button
                     type="button"
                     onClick={onRefreshSessions}
                     disabled={isLoadingSessions}
-                    className="inline-flex min-h-[36px] items-center gap-1.5 rounded-lg px-2.5 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 disabled:opacity-60 dark:text-blue-400 dark:hover:bg-blue-950/40"
+                    className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl px-2.5 py-1 text-xs font-medium text-[#1B6EF3] hover:bg-blue-50 disabled:opacity-60 dark:text-blue-400 dark:hover:bg-blue-950/40"
                   >
                     <RefreshCw className={`h-3.5 w-3.5 ${isLoadingSessions ? 'animate-spin' : ''}`} />
                     <span>同步云端</span>
@@ -715,98 +806,117 @@ export const ChatView: React.FC<ChatViewProps> = ({
                   type="button"
                   onClick={() => setSessionSheetOpen(false)}
                   aria-label="关闭会话列表"
-                  className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800"
+                  className="flex h-9 w-9 items-center justify-center rounded-xl text-zinc-500 hover:bg-stone-100 dark:hover:bg-zinc-800"
                 >
                   <X className="h-4 w-4" />
                 </button>
               </div>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-4 py-3 space-y-2">
-              <button
-                type="button"
-                onClick={() => {
-                  onNewSession();
-                  setSessionSheetOpen(false);
-                }}
-                className="flex min-h-[44px] w-full items-center justify-center gap-2 rounded-xl border border-dashed border-slate-300 px-3 py-2.5 text-xs font-medium text-slate-700 transition-colors hover:border-blue-500 hover:text-blue-600 dark:border-slate-700 dark:text-slate-200 dark:hover:border-blue-500 dark:hover:text-blue-400"
-              >
-                <Plus className="h-4 w-4" />
-                <span>新建空白会话</span>
-              </button>
-
-              <div className="divide-y divide-slate-100 rounded-2xl border border-slate-200/80 dark:divide-slate-800/80 dark:border-slate-800">
-                {sessions.map((s) => {
-                  const isActive = s.id === activeSession.id;
-                  return (
-                    <div
-                      key={s.id}
-                      className={`flex items-center justify-between gap-2 px-3.5 py-3 transition-colors ${
-                        isActive ? 'bg-blue-50/60 dark:bg-blue-950/30' : 'hover:bg-slate-50 dark:hover:bg-slate-800/40'
-                      }`}
-                    >
-                      <button
-                        type="button"
-                        onClick={() => {
-                          onSelectSession(s.id);
-                          setSessionSheetOpen(false);
-                        }}
-                        className="min-w-0 flex-1 text-left"
-                      >
-                        <div className="flex items-center gap-1.5">
-                          <span className="truncate text-xs font-medium text-slate-900 dark:text-slate-100">
-                            {s.title}
-                          </span>
-                          {isActive && (
-                            <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-400" />
-                          )}
-                        </div>
-                        <div className="mt-0.5 flex items-center gap-1.5 font-mono-tabular text-[11px] text-slate-400">
-                          <span>{s.source === 'remote' ? '云端' : '本地'}</span>
-                          <span aria-hidden="true">·</span>
-                          <span>{s.updatedAt}</span>
-                          {s.remoteSessionId && (
-                            <>
-                              <span aria-hidden="true">·</span>
-                              <span>{s.remoteSessionId.slice(0, 8)}</span>
-                            </>
-                          )}
-                        </div>
-                      </button>
-
-                      {sessions.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => onDeleteSession(s.id)}
-                          aria-label="从列表移除会话"
-                          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-slate-400 hover:bg-slate-200/70 hover:text-rose-600 dark:hover:bg-slate-800 dark:hover:text-rose-400"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </button>
-                      )}
-                    </div>
-                  );
-                })}
+            <div className="flex-1 overflow-y-auto px-4 py-3.5 space-y-3">
+              <div className="flex items-center gap-2">
+                <div className="relative flex-1">
+                  <Search className="pointer-events-none absolute top-1/2 left-3 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
+                  <input
+                    type="text"
+                    value={sessionSearch}
+                    onChange={(e) => setSessionSearch(e.target.value)}
+                    placeholder="搜索会话标题或 ID…"
+                    className="min-h-[40px] w-full rounded-xl border border-stone-200 bg-[#F8F7F4] py-1.5 pr-3 pl-8.5 text-xs text-zinc-900 placeholder:text-zinc-400 focus:border-[#1B6EF3] focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-[#0E0F12] dark:text-zinc-100"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onNewSession();
+                    setSessionSheetOpen(false);
+                  }}
+                  className="inline-flex min-h-[40px] shrink-0 items-center gap-1.5 rounded-xl bg-zinc-950 px-3.5 text-xs font-medium text-white hover:bg-zinc-800 dark:bg-[#1B6EF3] dark:hover:bg-blue-600"
+                >
+                  <Plus className="h-3.5 w-3.5" />
+                  <span>新会话</span>
+                </button>
               </div>
 
-              {/* Manual Remote Session ID binding */}
+              <div className="divide-y divide-stone-100 rounded-2xl border border-stone-200/80 dark:divide-zinc-800/80 dark:border-zinc-800">
+                {filteredSheetSessions.length === 0 ? (
+                  <div className="px-4 py-8 text-center text-xs text-zinc-400">
+                    没有匹配的会话
+                  </div>
+                ) : (
+                  filteredSheetSessions.map((s) => {
+                    const isActive = s.id === safeSession.id;
+                    return (
+                      <div
+                        key={s.id}
+                        className={`flex items-center justify-between gap-2 px-3.5 py-3 transition-colors first:rounded-t-2xl last:rounded-b-2xl ${
+                          isActive
+                            ? 'bg-stone-100/90 dark:bg-zinc-800/70'
+                            : 'hover:bg-stone-50 dark:hover:bg-zinc-900/60'
+                        }`}
+                      >
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onSelectSession(s.id);
+                            setSessionSheetOpen(false);
+                          }}
+                          className="min-w-0 flex-1 text-left"
+                        >
+                          <div className="flex items-center gap-1.5">
+                            <span className="truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                              {s.title}
+                            </span>
+                            {isActive && (
+                              <Check className="h-3.5 w-3.5 shrink-0 text-[#1B6EF3] dark:text-blue-400" />
+                            )}
+                          </div>
+                          <div className="mt-0.5 flex items-center gap-1.5 font-mono-tabular text-[11px] text-zinc-400">
+                            <span>{s.source === 'remote' ? '云端' : '本地'}</span>
+                            <span aria-hidden="true">·</span>
+                            <span>{s.updatedAt}</span>
+                            {s.remoteSessionId && (
+                              <>
+                                <span aria-hidden="true">·</span>
+                                <span>{s.remoteSessionId.slice(0, 8)}</span>
+                              </>
+                            )}
+                          </div>
+                        </button>
+
+                        {sessions.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => onDeleteSession(s.id)}
+                            aria-label="从列表移除会话"
+                            className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg text-zinc-400 hover:bg-stone-200/70 hover:text-rose-600 dark:hover:bg-zinc-800 dark:hover:text-rose-400"
+                          >
+                            <Trash2 className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })
+                )}
+              </div>
+
               {config.mode === 'dsh-bridge' && (
-                <form onSubmit={handleManualBindSubmit} className="pt-2">
-                  <label className="block text-[11px] font-medium text-slate-500 dark:text-slate-400">
-                    或直接输入已有 Session ID 接入
+                <form onSubmit={handleManualBindSubmit} className="pt-1">
+                  <label className="block text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+                    或直接粘贴已有 Session ID 接入
                   </label>
                   <div className="mt-1.5 flex items-center gap-2">
                     <input
                       type="text"
                       value={manualSessionInput}
                       onChange={(e) => setManualSessionInput(e.target.value)}
-                      placeholder="粘贴服务端 sessionId..."
-                      className="min-h-[40px] flex-1 rounded-xl border border-slate-200 bg-slate-50 px-3 py-1.5 font-mono-tabular text-xs text-slate-900 focus:border-blue-500 focus:bg-white focus:outline-none dark:border-slate-700 dark:bg-[#0B0E14] dark:text-slate-100"
+                      placeholder="粘贴服务端 sessionId…"
+                      className="min-h-[40px] flex-1 rounded-xl border border-stone-200 bg-[#F8F7F4] px-3 py-1.5 font-mono-tabular text-xs text-zinc-900 focus:border-[#1B6EF3] focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-[#0E0F12] dark:text-zinc-100"
                     />
                     <button
                       type="submit"
                       disabled={!manualSessionInput.trim()}
-                      className="min-h-[40px] rounded-xl bg-slate-900 px-3.5 text-xs font-medium text-white hover:bg-slate-800 disabled:opacity-40 dark:bg-blue-600 dark:hover:bg-blue-700 whitespace-nowrap"
+                      className="min-h-[40px] rounded-xl bg-zinc-950 px-3.5 text-xs font-medium text-white hover:bg-zinc-800 disabled:opacity-40 dark:bg-[#1B6EF3] dark:hover:bg-blue-600 whitespace-nowrap"
                     >
                       接入
                     </button>
@@ -821,7 +931,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
       {/* Fullscreen Image Lightbox */}
       {lightboxImage && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/85 p-4 backdrop-blur-xs"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/85 p-4 backdrop-blur-xs"
           onClick={() => setLightboxImage(null)}
         >
           <button
@@ -835,7 +945,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           <img
             src={lightboxImage.src}
             alt={lightboxImage.name}
-            className="max-h-[88vh] max-w-[94vw] rounded-xl object-contain"
+            className="max-h-[88vh] max-w-[94vw] rounded-2xl object-contain"
             onClick={(e) => e.stopPropagation()}
           />
         </div>
