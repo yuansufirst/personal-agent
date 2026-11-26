@@ -4,20 +4,23 @@
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AnimatePresence, motion } from 'motion/react';
 import {
   Check,
   Compass,
+  FlaskConical,
   Hash,
-  Link2,
+  HeartPulse,
+  Menu,
   MessageSquare,
-  Moon,
   Pencil,
   Plus,
   RefreshCw,
   Search,
-  Sun,
+  Settings,
   Target,
   Trash2,
+  X,
 } from 'lucide-react';
 import {
   DEFAULT_CONNECTION_CONFIG,
@@ -29,16 +32,20 @@ import {
   QUICK_MACROS,
 } from './data/initialData';
 import type {
+  AgentProfile,
   BriefingItem,
   ChatAttachment,
   ChatMessage,
   ConnectionConfig,
   GoalItem,
+  HealthConfig,
+  HealthDailyLog,
   InteractiveCard,
   MeshFileItem,
   MeshNode,
   QuickMacro,
   ReminderItem,
+  ResearchItem,
   SessionRecord,
   TabKey,
 } from './types/relay';
@@ -51,21 +58,53 @@ import {
 import { ChatView } from './components/ChatView';
 import { GoalsView } from './components/GoalsView';
 import { SpaceView } from './components/SpaceView';
+import { ResearchView } from './components/ResearchView';
+import { HealthView } from './components/HealthView';
 import { ConnectionSheet } from './components/ConnectionSheet';
+import { SettingsModal } from './components/SettingsModal';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAComponents';
 import { registerAndroidBackHandler, syncNativeStatusBar } from './services/nativeApp';
-import museAvatar from './assets/images/muse_agent_avatar_1795671239700.jpg';
+import { DEFAULT_AGENT_PROFILE, resolveAvatarSrc } from './services/avatarPresets';
 
 const STORAGE_KEYS = {
   config: 'relay_connection_config_v2',
+  profile: 'relay_agent_profile_v1',
   sessions: 'relay_sessions_v1',
   activeSessionId: 'relay_active_session_v1',
   briefings: 'relay_briefings_v2',
   reminders: 'relay_reminders_v2',
   goals: 'relay_goals_v1',
+  research: 'relay_research_v1',
+  healthConfig: 'relay_health_config_v1',
+  healthLog: 'relay_health_log_v1',
   nodes: 'relay_mesh_nodes_v2',
   theme: 'relay_theme_v1',
 };
+
+const DEFAULT_HEALTH_CONFIG: HealthConfig = {
+  sleepGoalHours: 7.5,
+  bedtimeTarget: '23:30',
+  wakeTarget: '07:00',
+  stepsGoal: 8000,
+  waterGoalCups: 8,
+  exerciseGoalMinutes: 30,
+  autoRemindBedtime: true,
+};
+
+function todayDateKey(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function createEmptyTodayLog(): HealthDailyLog {
+  return {
+    dateKey: todayDateKey(),
+    sleepHours: 7.0,
+    steps: 0,
+    waterCups: 0,
+    exerciseMinutes: 0,
+  };
+}
 
 function loadFromStorage<T>(key: string, fallback: T): T {
   try {
@@ -122,6 +161,10 @@ export default function App() {
     return false;
   });
 
+  const [agentProfile, setAgentProfile] = useState<AgentProfile>(() =>
+    loadFromStorage(STORAGE_KEYS.profile, DEFAULT_AGENT_PROFILE)
+  );
+
   const [config, setConfig] = useState<ConnectionConfig>(() =>
     loadFromStorage(STORAGE_KEYS.config, DEFAULT_CONNECTION_CONFIG)
   );
@@ -161,6 +204,20 @@ export default function App() {
     loadFromStorage(STORAGE_KEYS.goals, [])
   );
 
+  const [researchItems, setResearchItems] = useState<ResearchItem[]>(() =>
+    loadFromStorage(STORAGE_KEYS.research, [])
+  );
+
+  const [healthConfig, setHealthConfig] = useState<HealthConfig>(() =>
+    loadFromStorage(STORAGE_KEYS.healthConfig, DEFAULT_HEALTH_CONFIG)
+  );
+
+  const [healthLog, setHealthLog] = useState<HealthDailyLog>(() => {
+    const saved = loadFromStorage<HealthDailyLog | null>(STORAGE_KEYS.healthLog, null);
+    if (saved && saved.dateKey === todayDateKey()) return saved;
+    return createEmptyTodayLog();
+  });
+
   const [briefings, setBriefings] = useState<BriefingItem[]>(() => {
     const initialCfg = loadFromStorage(STORAGE_KEYS.config, DEFAULT_CONNECTION_CONFIG);
     return loadFromStorage(
@@ -186,6 +243,8 @@ export default function App() {
     return initialCfg.mode === 'sandbox' ? INITIAL_FILES : [];
   });
 
+  const [drawerOpen, setDrawerOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [selectedBriefing, setSelectedBriefing] = useState<BriefingItem | null>(null);
   const [previewFile, setPreviewFile] = useState<MeshFileItem | null>(null);
@@ -195,7 +254,7 @@ export default function App() {
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
 
-  // Desktop left-sidebar session helpers
+  // Sidebar session helpers
   const [sidebarSearch, setSidebarSearch] = useState('');
   const [showSidebarBind, setShowSidebarBind] = useState(false);
   const [sidebarBindInput, setSidebarBindInput] = useState('');
@@ -204,6 +263,8 @@ export default function App() {
 
   const abortRef = useRef<AbortController | null>(null);
   const toastTimerRef = useRef<number | null>(null);
+
+  const avatarSrc = resolveAvatarSrc(agentProfile);
 
   const activeSession = useMemo(() => {
     return sessions.find((s) => s.id === activeSessionId) || sessions[0] || createEmptySession();
@@ -235,6 +296,14 @@ export default function App() {
 
   useEffect(() => {
     return registerAndroidBackHandler(() => {
+      if (drawerOpen) {
+        setDrawerOpen(false);
+        return true;
+      }
+      if (settingsOpen) {
+        setSettingsOpen(false);
+        return true;
+      }
       if (connectionOpen) {
         setConnectionOpen(false);
         return true;
@@ -253,7 +322,11 @@ export default function App() {
       }
       return false;
     });
-  }, [connectionOpen, selectedBriefing, previewFile, activeTab]);
+  }, [drawerOpen, settingsOpen, connectionOpen, selectedBriefing, previewFile, activeTab]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.profile, JSON.stringify(agentProfile));
+  }, [agentProfile]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.config, JSON.stringify(config));
@@ -274,6 +347,18 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.goals, JSON.stringify(goals));
   }, [goals]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.research, JSON.stringify(researchItems));
+  }, [researchItems]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.healthConfig, JSON.stringify(healthConfig));
+  }, [healthConfig]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.healthLog, JSON.stringify(healthLog));
+  }, [healthLog]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.briefings, JSON.stringify(briefings));
@@ -387,6 +472,7 @@ export default function App() {
 
     setActiveSessionId(target.id);
     setActiveTab('chat');
+    setDrawerOpen(false);
 
     if (
       config.mode === 'dsh-bridge' &&
@@ -429,6 +515,7 @@ export default function App() {
     setSessions((prev) => [created, ...prev]);
     setActiveSessionId(created.id);
     setActiveTab('chat');
+    setDrawerOpen(false);
     showToast(`已接入会话 ${clean.slice(0, 8)}`);
 
     if (config.mode === 'dsh-bridge') {
@@ -483,6 +570,7 @@ export default function App() {
     setSessions((prev) => [fresh, ...prev]);
     setActiveSessionId(fresh.id);
     setActiveTab('chat');
+    setDrawerOpen(false);
     showToast('已创建新会话');
   };
 
@@ -609,7 +697,79 @@ export default function App() {
     }
   };
 
-  // Goals handlers (Muse Pillar 2)
+  // Research handlers
+  const handleAddResearch = (item: Omit<ResearchItem, 'id' | 'updatedAt'>) => {
+    setResearchItems((prev) => [
+      { ...item, id: `res-${Date.now()}`, updatedAt: todayDateKey() },
+      ...prev,
+    ]);
+  };
+
+  const handleUpdateResearchProgress = (id: string, progress: number) => {
+    setResearchItems((prev) =>
+      prev.map((i) => (i.id === id ? { ...i, progress, updatedAt: todayDateKey() } : i))
+    );
+  };
+
+  const handleUpdateResearchStatus = (id: string, status: ResearchItem['status']) => {
+    setResearchItems((prev) =>
+      prev.map((i) => (i.id === id ? { ...i, status, updatedAt: todayDateKey() } : i))
+    );
+  };
+
+  const handleDeleteResearch = (id: string) => {
+    setResearchItems((prev) => prev.filter((i) => i.id !== id));
+    showToast('已删除该科研记录');
+  };
+
+  const handleAskAboutResearch = (item: ResearchItem) => {
+    const prompt = [
+      `请帮我推进这条科研记录：「${item.title}」`,
+      item.venueOrSource ? `来源/出处：${item.venueOrSource}` : '',
+      `当前进度：${item.progress}%`,
+      item.url ? `参考链接：${item.url}` : '',
+      item.notes ? `已有笔记：\n${item.notes}` : '',
+      '请帮我提炼关键要点，并给出下一步最值得验证的实验或阅读建议。',
+    ]
+      .filter(Boolean)
+      .join('\n');
+    setActiveTab('chat');
+    void handleSendMessage(prompt);
+  };
+
+  // Health handlers
+  const handleScheduleBedtimeReminder = () => {
+    const title = `准备入睡（目标 ${healthConfig.sleepGoalHours}h 睡眠，${healthConfig.wakeTarget} 起床）`;
+    setReminders((prev) => [
+      {
+        id: `rem-sleep-${Date.now()}`,
+        title,
+        dueLabel: `今天 ${healthConfig.bedtimeTarget}`,
+        dayGroup: 'today',
+        repeat: '每天',
+        priority: 'high',
+        channel: 'ntfy',
+        completed: false,
+      },
+      ...prev,
+    ]);
+    showToast(`已生成 ${healthConfig.bedtimeTarget} 就寝提醒`);
+  };
+
+  const handleAskAgentHealthCheck = () => {
+    const prompt = [
+      `这是我今天的健康作息数据（${healthLog.dateKey}）：`,
+      `- 昨晚睡眠：${healthLog.sleepHours.toFixed(1)} 小时（目标 ${healthConfig.sleepGoalHours} 小时，理想入睡 ${healthConfig.bedtimeTarget} / 起床 ${healthConfig.wakeTarget}）`,
+      `- 今日步数：${healthLog.steps.toLocaleString()} 步（目标 ${healthConfig.stepsGoal.toLocaleString()} 步）`,
+      `- 饮水打卡：${healthLog.waterCups} / ${healthConfig.waterGoalCups} 杯`,
+      `- 活动运动：${healthLog.exerciseMinutes} / ${healthConfig.exerciseGoalMinutes} 分钟`,
+      '请帮我记录并在云端安排今晚的就寝与步数达标提醒，顺便给我一条简短的作息调整建议。',
+    ].join('\n');
+    setActiveTab('chat');
+    void handleSendMessage(prompt);
+  };
+
+  // Goals handlers
   const handleAddGoal = (title: string, notes: string, milestones: string[]) => {
     const newGoal: GoalItem = {
       id: `goal-${Date.now()}`,
@@ -780,7 +940,7 @@ export default function App() {
     showToast('已删除该提醒');
   };
 
-  // Approval card handler (preserves cloud-agent approval dispatch to dsh)
+  // Approval card handler
   const handleResolveApproval = (actionId: string, decision: 'approved' | 'rejected') => {
     const action = messages
       .flatMap((m) => m.cards ?? [])
@@ -875,32 +1035,65 @@ export default function App() {
     reminders.filter((r) => !r.completed && r.dayGroup === 'today').length +
     goals.filter((g) => g.status === 'active').length;
 
-  const navItems: {
+  const sidebarNavItems: {
     key: TabKey;
     label: string;
     Icon: React.ComponentType<{ className?: string }>;
+    badge?: number;
   }[] = [
     { key: 'chat', label: '对话', Icon: MessageSquare },
-    { key: 'goals', label: '目标', Icon: Target },
+    {
+      key: 'research',
+      label: '科研',
+      Icon: FlaskConical,
+      badge: researchItems.filter((r) => r.status !== 'archived').length,
+    },
+    { key: 'health', label: '健康', Icon: HeartPulse },
+    { key: 'goals', label: '目标', Icon: Target, badge: pendingGoalsOrReminders },
     { key: 'space', label: '空间', Icon: Compass },
   ];
 
-  return (
-    <div className="flex h-dvh flex-col overflow-hidden bg-[#F8F7F4] text-zinc-950 dark:bg-[#0E0F12] dark:text-zinc-100 lg:flex-row">
-      {/* Desktop Muse Left Navigation & Session Sidebar */}
-      <aside className="hidden lg:flex lg:w-[272px] lg:shrink-0 lg:flex-col border-r border-stone-200/80 bg-[#F3F1EC] dark:border-zinc-800/80 dark:bg-[#121318]">
-        {/* Brand + New Chat */}
-        <div className="flex items-center justify-between px-4 pt-5 pb-3">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <img
-              src={museAvatar}
-              alt="Relay"
-              className="h-8 w-8 shrink-0 rounded-full object-cover ring-1 ring-stone-300/70 dark:ring-zinc-700"
-            />
-            <span className="text-base font-semibold tracking-tight text-zinc-950 dark:text-zinc-50 whitespace-nowrap">
-              Relay
-            </span>
+  const mobileBottomItems = sidebarNavItems.slice(0, 4);
+
+  const activeHeaderTitle =
+    activeTab === 'chat'
+      ? agentProfile.name
+      : activeTab === 'research'
+        ? '科研与论文'
+        : activeTab === 'health'
+          ? '健康与作息'
+          : activeTab === 'goals'
+            ? '目标与日程'
+            : '空间与环境';
+
+  const renderSidebarContent = (isDrawer: boolean) => (
+    <div className="flex h-full flex-col">
+      {/* Assistant Brand Header + New Chat */}
+      <div className="flex items-center justify-between px-4 pt-5 pb-3">
+        <button
+          type="button"
+          onClick={() => {
+            if (isDrawer) setDrawerOpen(false);
+            setSettingsOpen(true);
+          }}
+          className="flex min-w-0 items-center gap-2.5 rounded-2xl pr-2 text-left transition-opacity hover:opacity-85"
+        >
+          <img
+            src={avatarSrc}
+            alt={agentProfile.name}
+            className="h-9 w-9 shrink-0 rounded-full object-cover ring-1 ring-stone-300/70 dark:ring-zinc-700"
+          />
+          <div className="min-w-0">
+            <div className="truncate text-[15px] font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
+              {agentProfile.name}
+            </div>
+            <div className="truncate text-[11px] text-zinc-400">
+              {agentProfile.subtitle || '私人 AI 助理'}
+            </div>
           </div>
+        </button>
+
+        <div className="flex items-center gap-1 shrink-0">
           <button
             type="button"
             onClick={handleNewSession}
@@ -910,375 +1103,479 @@ export default function App() {
           >
             <Plus className="h-4 w-4" />
           </button>
-        </div>
-
-        {/* 3-Pillar Navigation */}
-        <nav className="px-3 pt-1 pb-3 space-y-0.5">
-          {navItems.map(({ key, label, Icon }) => {
-            const active = activeTab === key;
-            return (
-              <button
-                key={key}
-                type="button"
-                onClick={() => setActiveTab(key)}
-                className={`flex min-h-[42px] w-full items-center justify-between rounded-2xl px-3 py-2 text-[13px] font-medium transition-colors whitespace-nowrap ${
-                  active
-                    ? 'bg-white text-zinc-950 shadow-xs dark:bg-[#1C1F26] dark:text-zinc-50'
-                    : 'text-zinc-600 hover:bg-stone-200/60 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800/60 dark:hover:text-zinc-100'
-                }`}
-              >
-                <span className="flex items-center gap-2.5">
-                  <Icon
-                    className={`h-[17px] w-[17px] ${
-                      active ? 'text-[#1B6EF3] dark:text-blue-400' : ''
-                    }`}
-                  />
-                  <span>{label}</span>
-                </span>
-                {key === 'goals' && pendingGoalsOrReminders > 0 && (
-                  <span className="font-mono-tabular text-[11px] text-zinc-400">
-                    {pendingGoalsOrReminders}
-                  </span>
-                )}
-              </button>
-            );
-          })}
-        </nav>
-
-        {/* Searchable Session History */}
-        <div className="flex min-h-0 flex-1 flex-col border-t border-stone-200/70 px-3 pt-3.5 dark:border-zinc-800/70">
-          <div className="flex items-center justify-between px-1.5">
-            <span className="text-[11px] font-semibold tracking-wide text-zinc-400">
-              会话列表
-            </span>
-            <div className="flex items-center gap-0.5">
-              {config.mode === 'dsh-bridge' && (
-                <>
-                  <button
-                    type="button"
-                    onClick={() => setShowSidebarBind((v) => !v)}
-                    aria-label="按 Session ID 接入"
-                    title="按 Session ID 接入"
-                    className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
-                      showSidebarBind
-                        ? 'bg-stone-200/90 text-[#1B6EF3] dark:bg-zinc-800 dark:text-blue-400'
-                        : 'text-zinc-400 hover:bg-stone-200/70 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-200'
-                    }`}
-                  >
-                    <Hash className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleRefreshSessions(false)}
-                    disabled={isLoadingSessions}
-                    aria-label="同步云端会话"
-                    title="同步云端会话"
-                    className="flex h-7 w-7 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-stone-200/70 hover:text-[#1B6EF3] disabled:opacity-50 dark:hover:bg-zinc-800 dark:hover:text-blue-400"
-                  >
-                    <RefreshCw
-                      className={`h-3.5 w-3.5 ${isLoadingSessions ? 'animate-spin' : ''}`}
-                    />
-                  </button>
-                </>
-              )}
-            </div>
-          </div>
-
-          {showSidebarBind && config.mode === 'dsh-bridge' && (
-            <form
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (!sidebarBindInput.trim()) return;
-                void handleBindSessionId(sidebarBindInput);
-                setSidebarBindInput('');
-                setShowSidebarBind(false);
-              }}
-              className="mt-2 flex items-center gap-1.5"
+          {isDrawer && (
+            <button
+              type="button"
+              onClick={() => setDrawerOpen(false)}
+              aria-label="关闭侧边栏"
+              className="flex h-9 w-9 items-center justify-center rounded-xl text-zinc-500 hover:bg-stone-200/60 dark:hover:bg-zinc-800"
             >
-              <input
-                type="text"
-                value={sidebarBindInput}
-                onChange={(e) => setSidebarBindInput(e.target.value)}
-                placeholder="粘贴 Session ID…"
-                className="min-h-[34px] min-w-0 flex-1 rounded-xl border border-stone-200 bg-white px-2.5 font-mono-tabular text-[11px] text-zinc-900 placeholder:text-zinc-400 focus:border-[#1B6EF3] focus:outline-none dark:border-zinc-700 dark:bg-[#181A20] dark:text-zinc-100"
-              />
-              <button
-                type="submit"
-                disabled={!sidebarBindInput.trim()}
-                className="min-h-[34px] shrink-0 rounded-xl bg-zinc-950 px-2.5 text-[11px] font-medium text-white disabled:opacity-40 dark:bg-[#1B6EF3]"
-              >
-                接入
-              </button>
-            </form>
+              <X className="h-4 w-4" />
+            </button>
           )}
-
-          {sessions.length > 3 && (
-            <div className="relative mt-2">
-              <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
-              <input
-                type="text"
-                value={sidebarSearch}
-                onChange={(e) => setSidebarSearch(e.target.value)}
-                placeholder="搜索会话…"
-                className="min-h-[34px] w-full rounded-xl border border-stone-200/80 bg-white/80 py-1 pr-2.5 pl-8 text-xs text-zinc-800 placeholder:text-zinc-400 focus:border-[#1B6EF3] focus:bg-white focus:outline-none dark:border-zinc-800 dark:bg-[#181A20] dark:text-zinc-100"
-              />
-            </div>
-          )}
-
-          <div className="mt-2 flex-1 overflow-y-auto space-y-0.5 pb-3">
-            {filteredSidebarSessions.map((s) => {
-              const isActive = s.id === activeSession.id && activeTab === 'chat';
-              const isRenaming = renamingSessionId === s.id;
-
-              return (
-                <div
-                  key={s.id}
-                  className={`group flex items-center justify-between gap-1.5 rounded-xl px-2.5 py-2 transition-colors ${
-                    isActive
-                      ? 'bg-white text-zinc-950 shadow-xs dark:bg-[#1C1F26] dark:text-zinc-50'
-                      : 'text-zinc-600 hover:bg-stone-200/55 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800/50 dark:hover:text-zinc-100'
-                  }`}
-                >
-                  {isRenaming ? (
-                    <div className="flex min-w-0 flex-1 items-center gap-1">
-                      <input
-                        type="text"
-                        autoFocus
-                        value={renameDraft}
-                        onChange={(e) => setRenameDraft(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter') handleRenameSession(s.id, renameDraft);
-                          if (e.key === 'Escape') setRenamingSessionId(null);
-                        }}
-                        onBlur={() => handleRenameSession(s.id, renameDraft)}
-                        className="min-w-0 flex-1 rounded-lg border border-[#1B6EF3] bg-[#F8F7F4] px-2 py-0.5 text-xs text-zinc-900 focus:outline-none dark:bg-[#0E0F12] dark:text-zinc-100"
-                      />
-                      <button
-                        type="button"
-                        onMouseDown={(e) => {
-                          e.preventDefault();
-                          handleRenameSession(s.id, renameDraft);
-                        }}
-                        aria-label="保存名称"
-                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[#1B6EF3] text-white"
-                      >
-                        <Check className="h-3 w-3" />
-                      </button>
-                    </div>
-                  ) : (
-                    <>
-                      <button
-                        type="button"
-                        onClick={() => void handleSelectSession(s.id)}
-                        className="min-w-0 flex-1 text-left"
-                      >
-                        <div className="truncate text-xs font-medium">{s.title}</div>
-                        <div className="mt-0.5 font-mono-tabular text-[10px] text-zinc-400">
-                          {s.source === 'remote' ? '云端' : '本地'} · {s.updatedAt}
-                        </div>
-                      </button>
-
-                      <div className="flex items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
-                        <button
-                          type="button"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setRenamingSessionId(s.id);
-                            setRenameDraft(s.title);
-                          }}
-                          aria-label="重命名会话"
-                          className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-400 hover:bg-stone-200/80 hover:text-zinc-800 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
-                        >
-                          <Pencil className="h-3 w-3" />
-                        </button>
-                        {sessions.length > 1 && (
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleDeleteSession(s.id);
-                            }}
-                            aria-label="删除会话"
-                            className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-400 hover:bg-stone-200/80 hover:text-rose-600 dark:hover:bg-zinc-700 dark:hover:text-rose-400"
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </button>
-                        )}
-                      </div>
-                    </>
-                  )}
-                </div>
-              );
-            })}
-          </div>
         </div>
+      </div>
 
-        {/* Bottom Utility Dock */}
-        <div className="space-y-2 border-t border-stone-200/70 p-3 dark:border-zinc-800/70">
-          <button
-            type="button"
-            onClick={() => setConnectionOpen(true)}
-            className="flex min-h-[40px] w-full items-center gap-2.5 rounded-2xl border border-stone-200/90 bg-white px-3 py-2 text-xs font-medium text-zinc-700 transition-colors hover:border-stone-300 dark:border-zinc-800 dark:bg-[#181A20] dark:text-zinc-300 dark:hover:border-zinc-700"
-          >
-            <Link2 className="h-3.5 w-3.5 text-[#1B6EF3] dark:text-blue-400 shrink-0" />
-            <span className="truncate">
-              {config.mode === 'sandbox' ? '连接配置 · 体验模式' : 'Tailscale 云端通道'}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setDarkMode((prev) => !prev)}
-            className="flex min-h-[38px] w-full items-center justify-center gap-2 rounded-2xl px-3 py-1.5 text-xs font-medium text-zinc-600 transition-colors hover:bg-stone-200/60 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100 whitespace-nowrap"
-          >
-            {darkMode ? <Sun className="h-3.5 w-3.5" /> : <Moon className="h-3.5 w-3.5" />}
-            <span>{darkMode ? '切换浅色外观' : '切换深色外观'}</span>
-          </button>
-
-          <PWAInstallButton />
-        </div>
-      </aside>
-
-      {/* Mobile Compact Top Header (52px) */}
-      <header className="flex h-[52px] shrink-0 items-center justify-between border-b border-stone-200/80 bg-[#F8F7F4]/95 px-4 backdrop-blur-md dark:border-zinc-800/80 dark:bg-[#0E0F12]/95 lg:hidden">
-        <div className="flex items-center gap-2.5">
-          <img
-            src={museAvatar}
-            alt="Relay"
-            className="h-7 w-7 rounded-full object-cover ring-1 ring-stone-200 dark:ring-zinc-700"
-          />
-          <span className="text-base font-semibold tracking-tight text-zinc-950 dark:text-zinc-50 whitespace-nowrap shrink-0">
-            Relay
-          </span>
-        </div>
-
-        <div className="flex items-center gap-1">
-          <button
-            type="button"
-            onClick={() => setDarkMode((prev) => !prev)}
-            aria-label="切换深浅色主题"
-            className="flex h-10 w-10 items-center justify-center rounded-xl text-zinc-600 hover:bg-stone-200/60 dark:text-zinc-300 dark:hover:bg-zinc-800"
-          >
-            {darkMode ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-          </button>
-          <button
-            type="button"
-            onClick={() => setConnectionOpen(true)}
-            className="inline-flex h-9 items-center gap-1.5 rounded-xl bg-zinc-950 px-3 text-xs font-medium text-white dark:bg-[#1B6EF3] whitespace-nowrap shrink-0"
-          >
-            <Link2 className="h-3.5 w-3.5" />
-            <span>连接</span>
-          </button>
-        </div>
-      </header>
-
-      {/* Spacious Center Stage (No Cramped Right Sidebar) */}
-      <main className="min-h-0 flex-1 overflow-y-auto">
-        {activeTab === 'chat' && (
-          <div className="h-full pb-[60px] lg:pb-0">
-            <ChatView
-              messages={messages}
-              sessions={sessions}
-              activeSession={activeSession}
-              isLoadingSessions={isLoadingSessions}
-              isLoadingHistory={isLoadingHistory}
-              config={config}
-              isStreaming={isStreaming}
-              onSendMessage={handleSendMessage}
-              onStopStreaming={handleStopStreaming}
-              onNewSession={handleNewSession}
-              onSelectSession={handleSelectSession}
-              onDeleteSession={handleDeleteSession}
-              onRefreshSessions={() => void handleRefreshSessions(false)}
-              onBindSessionId={(id) => void handleBindSessionId(id)}
-              onOpenConnection={() => setConnectionOpen(true)}
-              onToggleSaveBriefing={handleToggleSaveBriefing}
-              onOpenBriefing={(item) => {
-                setSelectedBriefing(item);
-                setActiveTab('space');
-              }}
-              onAskAboutBriefing={handleAskAboutBriefing}
-              onToggleReminder={(item) => handleToggleReminderById(item.id)}
-              onSnoozeReminder={(item) => handleSnoozeReminderById(item.id)}
-              onSyncReminder={handleSyncReminderFromCard}
-              onResolveApproval={handleResolveApproval}
-              onPreviewFile={(file) => {
-                setPreviewFile(file);
-                setActiveTab('space');
-              }}
-              onAskAboutFile={handleAskAboutFile}
-              onShowToast={showToast}
-            />
-          </div>
-        )}
-
-        {activeTab === 'goals' && (
-          <GoalsView
-            goals={goals}
-            reminders={reminders}
-            config={config}
-            onAddGoal={handleAddGoal}
-            onToggleMilestone={handleToggleMilestone}
-            onDeleteGoal={handleDeleteGoal}
-            onDelegateGoal={handleDelegateGoal}
-            onAddReminder={handleAddReminder}
-            onToggleReminder={handleToggleReminderById}
-            onSnoozeReminder={handleSnoozeReminderById}
-            onDeleteReminder={handleDeleteReminder}
-            onShowToast={showToast}
-          />
-        )}
-
-        {activeTab === 'space' && (
-          <SpaceView
-            config={config}
-            nodes={nodes}
-            macros={QUICK_MACROS}
-            files={files}
-            briefings={briefings}
-            selectedBriefing={selectedBriefing}
-            previewFile={previewFile}
-            isFetchingDigest={isFetchingDigest}
-            onOpenConnection={() => setConnectionOpen(true)}
-            onUpdateNodeIp={handleUpdateNodeIp}
-            onRunMacro={handleRunMacro}
-            onUploadLocalFile={handleUploadLocalFile}
-            onAskAboutFile={handleAskAboutFile}
-            onSelectPreviewFile={setPreviewFile}
-            onFetchFreshDigest={handleFetchFreshDigest}
-            onToggleSaveBriefing={handleToggleSaveBriefing}
-            onSelectBriefing={setSelectedBriefing}
-            onAskAboutBriefing={handleAskAboutBriefing}
-          />
-        )}
-      </main>
-
-      {/* Mobile Fixed 3-Pillar Bottom Tab Bar (60px, Thumb Zone Ergonomics) */}
-      <nav
-        aria-label="主导航"
-        className="fixed bottom-0 left-0 right-0 z-40 grid h-[60px] grid-cols-3 items-center border-t border-stone-200/90 bg-[#F8F7F4]/95 pb-safe backdrop-blur-md dark:border-zinc-800/90 dark:bg-[#0E0F12]/95 lg:hidden"
-      >
-        {navItems.map(({ key, label, Icon }) => {
+      {/* 5-Pillar Workspace Navigation */}
+      <nav className="px-3 pt-1 pb-3 space-y-0.5">
+        {sidebarNavItems.map(({ key, label, Icon, badge }) => {
           const active = activeTab === key;
           return (
             <button
               key={key}
               type="button"
+              onClick={() => {
+                setActiveTab(key);
+                if (isDrawer) setDrawerOpen(false);
+              }}
+              className={`relative flex min-h-[42px] w-full items-center justify-between rounded-2xl px-3 py-2 text-[13px] font-medium transition-colors whitespace-nowrap ${
+                active
+                  ? 'text-zinc-950 dark:text-zinc-50'
+                  : 'text-zinc-600 hover:bg-stone-200/55 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800/55 dark:hover:text-zinc-100'
+              }`}
+            >
+              {active && (
+                <motion.span
+                  layoutId={isDrawer ? 'drawer-nav-pill' : 'desktop-nav-pill'}
+                  transition={{ type: 'spring', stiffness: 420, damping: 34 }}
+                  className="absolute inset-0 rounded-2xl bg-white shadow-xs dark:bg-[#1C1F26]"
+                />
+              )}
+              <span className="relative z-10 flex items-center gap-2.5">
+                <Icon
+                  className={`h-[17px] w-[17px] ${
+                    active ? 'text-[#1B6EF3] dark:text-blue-400' : ''
+                  }`}
+                />
+                <span>{label}</span>
+              </span>
+              {badge !== undefined && badge > 0 && (
+                <span className="relative z-10 font-mono-tabular text-[11px] text-zinc-400">
+                  {badge}
+                </span>
+              )}
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* Searchable Session History */}
+      <div className="flex min-h-0 flex-1 flex-col border-t border-stone-200/70 px-3 pt-3.5 dark:border-zinc-800/70">
+        <div className="flex items-center justify-between px-1.5">
+          <span className="text-[11px] font-semibold tracking-wide text-zinc-400">
+            会话列表
+          </span>
+          <div className="flex items-center gap-0.5">
+            {config.mode === 'dsh-bridge' && (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setShowSidebarBind((v) => !v)}
+                  aria-label="按 Session ID 接入"
+                  title="按 Session ID 接入"
+                  className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+                    showSidebarBind
+                      ? 'bg-stone-200/90 text-[#1B6EF3] dark:bg-zinc-800 dark:text-blue-400'
+                      : 'text-zinc-400 hover:bg-stone-200/70 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-200'
+                  }`}
+                >
+                  <Hash className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleRefreshSessions(false)}
+                  disabled={isLoadingSessions}
+                  aria-label="同步云端会话"
+                  title="同步云端会话"
+                  className="flex h-7 w-7 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-stone-200/70 hover:text-[#1B6EF3] disabled:opacity-50 dark:hover:bg-zinc-800 dark:hover:text-blue-400"
+                >
+                  <RefreshCw
+                    className={`h-3.5 w-3.5 ${isLoadingSessions ? 'animate-spin' : ''}`}
+                  />
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+
+        {showSidebarBind && config.mode === 'dsh-bridge' && (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (!sidebarBindInput.trim()) return;
+              void handleBindSessionId(sidebarBindInput);
+              setSidebarBindInput('');
+              setShowSidebarBind(false);
+            }}
+            className="mt-2 flex items-center gap-1.5"
+          >
+            <input
+              type="text"
+              value={sidebarBindInput}
+              onChange={(e) => setSidebarBindInput(e.target.value)}
+              placeholder="粘贴 Session ID…"
+              className="min-h-[34px] min-w-0 flex-1 rounded-xl border border-stone-200 bg-white px-2.5 font-mono-tabular text-[11px] text-zinc-900 placeholder:text-zinc-400 focus:border-[#1B6EF3] focus:outline-none dark:border-zinc-700 dark:bg-[#181A20] dark:text-zinc-100"
+            />
+            <button
+              type="submit"
+              disabled={!sidebarBindInput.trim()}
+              className="min-h-[34px] shrink-0 rounded-xl bg-zinc-950 px-2.5 text-[11px] font-medium text-white disabled:opacity-40 dark:bg-[#1B6EF3]"
+            >
+              接入
+            </button>
+          </form>
+        )}
+
+        {sessions.length > 3 && (
+          <div className="relative mt-2">
+            <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
+            <input
+              type="text"
+              value={sidebarSearch}
+              onChange={(e) => setSidebarSearch(e.target.value)}
+              placeholder="搜索会话…"
+              className="min-h-[34px] w-full rounded-xl border border-stone-200/80 bg-white/80 py-1 pr-2.5 pl-8 text-xs text-zinc-800 placeholder:text-zinc-400 focus:border-[#1B6EF3] focus:bg-white focus:outline-none dark:border-zinc-800 dark:bg-[#181A20] dark:text-zinc-100"
+            />
+          </div>
+        )}
+
+        <div className="mt-2 flex-1 overflow-y-auto space-y-0.5 pb-3">
+          {filteredSidebarSessions.map((s) => {
+            const isActive = s.id === activeSession.id && activeTab === 'chat';
+            const isRenaming = renamingSessionId === s.id;
+
+            return (
+              <div
+                key={s.id}
+                className={`group flex items-center justify-between gap-1.5 rounded-xl px-2.5 py-2 transition-colors ${
+                  isActive
+                    ? 'bg-white text-zinc-950 shadow-xs dark:bg-[#1C1F26] dark:text-zinc-50'
+                    : 'text-zinc-600 hover:bg-stone-200/55 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800/50 dark:hover:text-zinc-100'
+                }`}
+              >
+                {isRenaming ? (
+                  <div className="flex min-w-0 flex-1 items-center gap-1">
+                    <input
+                      type="text"
+                      autoFocus
+                      value={renameDraft}
+                      onChange={(e) => setRenameDraft(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') handleRenameSession(s.id, renameDraft);
+                        if (e.key === 'Escape') setRenamingSessionId(null);
+                      }}
+                      onBlur={() => handleRenameSession(s.id, renameDraft)}
+                      className="min-w-0 flex-1 rounded-lg border border-[#1B6EF3] bg-[#F8F7F4] px-2 py-0.5 text-xs text-zinc-900 focus:outline-none dark:bg-[#0E0F12] dark:text-zinc-100"
+                    />
+                    <button
+                      type="button"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        handleRenameSession(s.id, renameDraft);
+                      }}
+                      aria-label="保存名称"
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[#1B6EF3] text-white"
+                    >
+                      <Check className="h-3 w-3" />
+                    </button>
+                  </div>
+                ) : (
+                  <>
+                    <button
+                      type="button"
+                      onClick={() => void handleSelectSession(s.id)}
+                      className="min-w-0 flex-1 text-left"
+                    >
+                      <div className="truncate text-xs font-medium">{s.title}</div>
+                      <div className="mt-0.5 font-mono-tabular text-[10px] text-zinc-400">
+                        {s.source === 'remote' ? '云端' : '本地'} · {s.updatedAt}
+                      </div>
+                    </button>
+
+                    <div className="flex items-center gap-0.5 opacity-70 sm:opacity-0 transition-opacity sm:group-hover:opacity-100">
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setRenamingSessionId(s.id);
+                          setRenameDraft(s.title);
+                        }}
+                        aria-label="重命名会话"
+                        className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-400 hover:bg-stone-200/80 hover:text-zinc-800 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+                      >
+                        <Pencil className="h-3 w-3" />
+                      </button>
+                      {sessions.length > 1 && (
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleDeleteSession(s.id);
+                          }}
+                          aria-label="删除会话"
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-400 hover:bg-stone-200/80 hover:text-rose-600 dark:hover:bg-zinc-700 dark:hover:text-rose-400"
+                        >
+                          <Trash2 className="h-3 w-3" />
+                        </button>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Unified Settings Dock (Houses Avatar/Name, Theme, and Connection) */}
+      <div className="space-y-2 border-t border-stone-200/70 p-3 dark:border-zinc-800/70">
+        <button
+          type="button"
+          onClick={() => {
+            if (isDrawer) setDrawerOpen(false);
+            setSettingsOpen(true);
+          }}
+          className="flex min-h-[44px] w-full items-center justify-between gap-2.5 rounded-2xl border border-stone-200/90 bg-white px-3.5 py-2 text-xs font-medium text-zinc-800 transition-all active:scale-[0.98] hover:border-stone-300 dark:border-zinc-800 dark:bg-[#181A20] dark:text-zinc-200 dark:hover:border-zinc-700"
+        >
+          <span className="flex items-center gap-2.5">
+            <Settings className="h-4 w-4 text-[#1B6EF3] dark:text-blue-400 shrink-0" />
+            <span>设置</span>
+          </span>
+          <span className="text-[11px] text-zinc-400">头像 · 外观 · 连接</span>
+        </button>
+
+        <PWAInstallButton />
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="flex h-dvh flex-col overflow-hidden bg-[#F8F7F4] text-zinc-950 dark:bg-[#0E0F12] dark:text-zinc-100 lg:flex-row">
+      {/* Desktop Left Sidebar */}
+      <aside className="hidden lg:flex lg:w-[276px] lg:shrink-0 lg:flex-col border-r border-stone-200/80 bg-[#F3F1EC] dark:border-zinc-800/80 dark:bg-[#121318]">
+        {renderSidebarContent(false)}
+      </aside>
+
+      {/* Mobile Slide-Out Frosted Sidebar Drawer */}
+      <AnimatePresence>
+        {drawerOpen && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.18 }}
+            className="fixed inset-0 z-50 flex bg-black/45 backdrop-blur-xs lg:hidden"
+            onClick={() => setDrawerOpen(false)}
+          >
+            <motion.aside
+              initial={{ x: '-100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '-100%' }}
+              transition={{ type: 'spring', stiffness: 380, damping: 36 }}
+              onClick={(e) => e.stopPropagation()}
+              className="h-full w-[82vw] max-w-[304px] border-r border-stone-200/80 bg-[#F3F1EC]/95 backdrop-blur-xl shadow-2xl dark:border-zinc-800 dark:bg-[#121318]/95"
+            >
+              {renderSidebarContent(true)}
+            </motion.aside>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Mobile Ultra-Clean Top Header (52px) */}
+      <header className="flex h-[52px] shrink-0 items-center justify-between border-b border-stone-200/80 bg-[#F8F7F4]/95 px-3 backdrop-blur-md dark:border-zinc-800/80 dark:bg-[#0E0F12]/95 lg:hidden">
+        <div className="flex min-w-0 items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setDrawerOpen(true)}
+            aria-label="打开侧边栏"
+            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-zinc-700 transition-colors active:scale-95 hover:bg-stone-200/60 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            <Menu className="h-5 w-5" />
+          </button>
+          <img
+            src={avatarSrc}
+            alt={agentProfile.name}
+            className="h-7 w-7 shrink-0 rounded-full object-cover ring-1 ring-stone-200 dark:ring-zinc-700"
+          />
+          <span className="truncate text-[15px] font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
+            {activeHeaderTitle}
+          </span>
+        </div>
+
+        <button
+          type="button"
+          onClick={handleNewSession}
+          aria-label="新建对话"
+          className="inline-flex h-9 items-center gap-1 rounded-xl px-2.5 text-xs font-medium text-zinc-700 transition-colors active:scale-95 hover:bg-stone-200/60 dark:text-zinc-200 dark:hover:bg-zinc-800 shrink-0"
+        >
+          <Plus className="h-4 w-4" />
+          <span>新对话</span>
+        </button>
+      </header>
+
+      {/* Animated Center Stage */}
+      <main className="min-h-0 flex-1 overflow-hidden">
+        <AnimatePresence mode="wait">
+          <motion.div
+            key={activeTab}
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -6 }}
+            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
+            className="h-full overflow-y-auto"
+          >
+            {activeTab === 'chat' && (
+              <div className="h-full">
+                <ChatView
+                  messages={messages}
+                  sessions={sessions}
+                  activeSession={activeSession}
+                  agentProfile={agentProfile}
+                  isLoadingSessions={isLoadingSessions}
+                  isLoadingHistory={isLoadingHistory}
+                  config={config}
+                  isStreaming={isStreaming}
+                  onSendMessage={handleSendMessage}
+                  onStopStreaming={handleStopStreaming}
+                  onNewSession={handleNewSession}
+                  onSelectSession={handleSelectSession}
+                  onDeleteSession={handleDeleteSession}
+                  onRefreshSessions={() => void handleRefreshSessions(false)}
+                  onBindSessionId={(id) => void handleBindSessionId(id)}
+                  onOpenSettings={() => setSettingsOpen(true)}
+                  onToggleSaveBriefing={handleToggleSaveBriefing}
+                  onOpenBriefing={(item) => {
+                    setSelectedBriefing(item);
+                    setActiveTab('space');
+                  }}
+                  onAskAboutBriefing={handleAskAboutBriefing}
+                  onToggleReminder={(item) => handleToggleReminderById(item.id)}
+                  onSnoozeReminder={(item) => handleSnoozeReminderById(item.id)}
+                  onSyncReminder={handleSyncReminderFromCard}
+                  onResolveApproval={handleResolveApproval}
+                  onPreviewFile={(file) => {
+                    setPreviewFile(file);
+                    setActiveTab('space');
+                  }}
+                  onAskAboutFile={handleAskAboutFile}
+                  onShowToast={showToast}
+                />
+              </div>
+            )}
+
+            {activeTab === 'research' && (
+              <ResearchView
+                items={researchItems}
+                onAddItem={handleAddResearch}
+                onUpdateProgress={handleUpdateResearchProgress}
+                onUpdateStatus={handleUpdateResearchStatus}
+                onDeleteItem={handleDeleteResearch}
+                onAskAgent={handleAskAboutResearch}
+                onShowToast={showToast}
+              />
+            )}
+
+            {activeTab === 'health' && (
+              <HealthView
+                healthConfig={healthConfig}
+                todayLog={healthLog}
+                onUpdateConfig={setHealthConfig}
+                onUpdateTodayLog={setHealthLog}
+                onScheduleBedtimeReminder={handleScheduleBedtimeReminder}
+                onAskAgentHealthCheck={handleAskAgentHealthCheck}
+              />
+            )}
+
+            {activeTab === 'goals' && (
+              <GoalsView
+                goals={goals}
+                reminders={reminders}
+                config={config}
+                onAddGoal={handleAddGoal}
+                onToggleMilestone={handleToggleMilestone}
+                onDeleteGoal={handleDeleteGoal}
+                onDelegateGoal={handleDelegateGoal}
+                onAddReminder={handleAddReminder}
+                onToggleReminder={handleToggleReminderById}
+                onSnoozeReminder={handleSnoozeReminderById}
+                onDeleteReminder={handleDeleteReminder}
+                onShowToast={showToast}
+              />
+            )}
+
+            {activeTab === 'space' && (
+              <SpaceView
+                config={config}
+                nodes={nodes}
+                macros={QUICK_MACROS}
+                files={files}
+                briefings={briefings}
+                selectedBriefing={selectedBriefing}
+                previewFile={previewFile}
+                isFetchingDigest={isFetchingDigest}
+                onOpenConnection={() => setConnectionOpen(true)}
+                onUpdateNodeIp={handleUpdateNodeIp}
+                onRunMacro={handleRunMacro}
+                onUploadLocalFile={handleUploadLocalFile}
+                onAskAboutFile={handleAskAboutFile}
+                onSelectPreviewFile={setPreviewFile}
+                onFetchFreshDigest={handleFetchFreshDigest}
+                onToggleSaveBriefing={handleToggleSaveBriefing}
+                onSelectBriefing={setSelectedBriefing}
+                onAskAboutBriefing={handleAskAboutBriefing}
+              />
+            )}
+          </motion.div>
+        </AnimatePresence>
+      </main>
+
+      {/* Mobile Bottom Tab Bar (Flex-flow so Android insets & keyboard never overlap!) */}
+      <nav
+        aria-label="主导航"
+        className="shrink-0 grid h-[62px] grid-cols-4 items-center gap-1 border-t border-stone-200/90 bg-[#F8F7F4]/95 px-2 backdrop-blur-md dark:border-zinc-800/90 dark:bg-[#0E0F12]/95 lg:hidden"
+      >
+        {mobileBottomItems.map(({ key, label, Icon }) => {
+          const active = activeTab === key;
+          return (
+            <motion.button
+              key={key}
+              type="button"
+              whileTap={{ scale: 0.92 }}
               onClick={() => setActiveTab(key)}
-              className={`flex h-full min-h-[44px] flex-col items-center justify-center gap-0.5 transition-colors ${
+              className={`relative flex h-[48px] flex-col items-center justify-center gap-0.5 rounded-2xl transition-colors ${
                 active
                   ? 'text-[#1B6EF3] dark:text-blue-400'
                   : 'text-zinc-500 dark:text-zinc-400'
               }`}
             >
-              <Icon className="h-5 w-5" />
-              <span className="text-[11px] font-medium tracking-tight whitespace-nowrap">
+              {active && (
+                <motion.span
+                  layoutId="mobile-tab-pill"
+                  transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                  className="absolute inset-0 rounded-2xl bg-white/95 shadow-xs ring-1 ring-stone-200/70 dark:bg-[#1B1E26] dark:ring-zinc-800"
+                />
+              )}
+              <Icon className="relative z-10 h-[19px] w-[19px]" />
+              <span className="relative z-10 text-[11px] font-medium tracking-tight whitespace-nowrap">
                 {label}
               </span>
-            </button>
+            </motion.button>
           );
         })}
       </nav>
+
+      {/* Unified Sidebar Settings Modal (Avatar/Name, Theme, Connection) */}
+      <SettingsModal
+        open={settingsOpen}
+        profile={agentProfile}
+        darkMode={darkMode}
+        config={config}
+        onClose={() => setSettingsOpen(false)}
+        onUpdateProfile={setAgentProfile}
+        onToggleDarkMode={setDarkMode}
+        onOpenConnection={() => setConnectionOpen(true)}
+        onShowToast={showToast}
+      />
 
       {/* Connection & DeepSeek Harness Configuration Bottom Sheet */}
       <ConnectionSheet
@@ -1303,14 +1600,20 @@ export default function App() {
       <OfflineIndicator />
 
       {/* Action Feedback Toast */}
-      {toast && (
-        <div
-          role="status"
-          className="fixed top-16 left-1/2 z-50 -translate-x-1/2 rounded-2xl bg-zinc-950 px-4 py-2.5 text-xs font-medium text-white shadow-lg dark:bg-zinc-100 dark:text-zinc-950 lg:top-5 whitespace-nowrap"
-        >
-          {toast}
-        </div>
-      )}
+      <AnimatePresence>
+        {toast && (
+          <motion.div
+            role="status"
+            initial={{ opacity: 0, y: -12, scale: 0.96 }}
+            animate={{ opacity: 1, y: 0, scale: 1 }}
+            exit={{ opacity: 0, y: -10, scale: 0.96 }}
+            transition={{ type: 'spring', stiffness: 420, damping: 30 }}
+            className="fixed top-16 left-1/2 z-50 -translate-x-1/2 rounded-2xl bg-zinc-950/95 px-4 py-2.5 text-xs font-medium text-white shadow-lg backdrop-blur-md dark:bg-zinc-100/95 dark:text-zinc-950 lg:top-5 whitespace-nowrap"
+          >
+            {toast}
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

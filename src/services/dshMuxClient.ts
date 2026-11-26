@@ -6,7 +6,11 @@ import type {
   RemoteSessionSummary,
 } from '../types/relay';
 import { extractRelayCards, type AgentReplyChunk } from './agentClient';
-import { createDshWebSocket, type DshWebSocketLike } from './nativeSocket';
+import {
+  createDshWebSocket,
+  uploadBinaryNativeIfAvailable,
+  type DshWebSocketLike,
+} from './nativeSocket';
 
 /**
  * DeepSeek Harness (/api/remote.mux) stream-protocol.ts frames
@@ -1140,9 +1144,151 @@ function buildTextWithFileAttachments(prompt: string, attachments?: ChatAttachme
   return `${prompt}\n\n${textBlocks.join('\n\n')}`;
 }
 
+function extractBase64Payload(att: ChatAttachment): string {
+  if (att.base64Data) return att.base64Data;
+  if (att.dataUrl) {
+    const idx = att.dataUrl.indexOf(',');
+    return idx >= 0 ? att.dataUrl.slice(idx + 1) : att.dataUrl;
+  }
+  return '';
+}
+
+function findReceiptIdInPayload(node: unknown): string | undefined {
+  if (!node || typeof node !== 'object') return undefined;
+  const obj = node as Record<string, unknown>;
+  for (const key of ['receiptId', 'attachmentId', 'fileId']) {
+    if (typeof obj[key] === 'string' && obj[key]) return String(obj[key]);
+  }
+  for (const nestedKey of ['payload', 'result', 'value', 'data', 'receipt', 'file']) {
+    if (obj[nestedKey] && typeof obj[nestedKey] === 'object') {
+      const found = findReceiptIdInPayload(obj[nestedKey]);
+      if (found) return found;
+    }
+  }
+  return undefined;
+}
+
+function base64ToUint8Array(base64: string): Uint8Array {
+  const binary = atob(base64);
+  const len = binary.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binary.charCodeAt(i);
+  }
+  return bytes;
+}
+
+/**
+ * Uploads an image or binary file to DeepSeek Harness `POST /api/session/uploadFileBinary`
+ * and returns its staging `receiptId` for `{ type: 'file', receiptId }` in `session/prompt`.
+ */
+async function uploadAttachmentToDsh(
+  config: ConnectionConfig,
+  sessionId: string,
+  att: ChatAttachment,
+  signal?: AbortSignal
+): Promise<string | null> {
+  const base = config.serverUrl.trim().replace(/\/+$/, '');
+  const base64Data = extractBase64Payload(att);
+  if (!base || !base64Data) return null;
+
+  const mimeType = att.mimeType || 'application/octet-stream';
+  const filename = att.name || 'attachment.bin';
+  const query = new URLSearchParams({
+    sessionId,
+    filename,
+    mimeType,
+  }).toString();
+
+  const candidateUrls = [
+    `${base}/api/session/uploadFileBinary?${query}`,
+    `${base}/api/session/uploadFileBinary`,
+  ];
+
+  const modes: Array<'raw' | 'multipart'> = ['raw', 'multipart'];
+
+  for (const url of candidateUrls) {
+    for (const mode of modes) {
+      try {
+        // 1. Native Android APK path via OkHttp (avoids CapacitorHttp Blob quirks & CORS)
+        const nativeRes = await uploadBinaryNativeIfAvailable({
+          url,
+          base64Data,
+          mimeType,
+          filename,
+          sessionId,
+          mode,
+        });
+
+        if (nativeRes) {
+          if (nativeRes.ok && nativeRes.body) {
+            try {
+              const parsed = JSON.parse(nativeRes.body);
+              const receiptId = findReceiptIdInPayload(parsed);
+              if (receiptId) return receiptId;
+            } catch {
+              // ignore non-json
+            }
+          }
+          if (nativeRes.status === 404) {
+            // Route not mounted on this host; skip trying other mode on same URL
+            break;
+          }
+          continue;
+        }
+
+        // 2. Standard Web/PWA path via fetch
+        const bytes = base64ToUint8Array(base64Data);
+        let res: Response;
+        if (mode === 'raw') {
+          res = await fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': mimeType,
+              'X-File-Name': encodeURIComponent(filename),
+              'X-Session-Id': sessionId,
+            },
+            body: bytes as unknown as BodyInit,
+            signal,
+          });
+        } else {
+          const form = new FormData();
+          form.append('sessionId', sessionId);
+          form.append('filename', filename);
+          form.append('mimeType', mimeType);
+          form.append('file', new Blob([bytes as unknown as BlobPart], { type: mimeType }), filename);
+          res = await fetch(url, {
+            method: 'POST',
+            body: form,
+            signal,
+          });
+        }
+
+        if (res.ok) {
+          const text = await res.text();
+          try {
+            const parsed = JSON.parse(text);
+            const receiptId = findReceiptIdInPayload(parsed);
+            if (receiptId) return receiptId;
+          } catch {
+            // ignore
+          }
+        }
+        if (res.status === 404) break;
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') throw err;
+        // Try next upload format
+      }
+    }
+  }
+
+  return null;
+}
+
 function buildMultimodalContentCandidates(
   prompt: string,
-  attachments?: ChatAttachment[]
+  attachments?: ChatAttachment[],
+  uploadedReceipts?: Array<{ receiptId: string; att: ChatAttachment }>
 ): Record<string, unknown>[][] {
   const combinedText = buildTextWithFileAttachments(prompt, attachments);
   const mediaAttachments = (attachments || []).filter(
@@ -1153,6 +1299,23 @@ function buildMultimodalContentCandidates(
     return [[{ type: 'text', text: combinedText }]];
   }
 
+  const candidates: Record<string, unknown>[][] = [];
+
+  // #1 Preferred official DeepSeek Harness format: staged receiptId via uploadFileBinary
+  if (uploadedReceipts && uploadedReceipts.length === mediaAttachments.length) {
+    candidates.push([
+      ...uploadedReceipts.map((r) => ({ type: 'file', receiptId: r.receiptId })),
+      { type: 'text', text: combinedText },
+    ]);
+    candidates.push([
+      { type: 'text', text: combinedText },
+      ...uploadedReceipts.map((r) => ({
+        type: r.att.mimeType.startsWith('image/') ? 'image' : 'file',
+        receiptId: r.receiptId,
+      })),
+    ]);
+  }
+
   const makeParts = (
     mapper: (att: ChatAttachment) => Record<string, unknown>
   ): Record<string, unknown>[] => [
@@ -1160,7 +1323,7 @@ function buildMultimodalContentCandidates(
     ...mediaAttachments.map(mapper),
   ];
 
-  return [
+  candidates.push(
     makeParts((att) =>
       att.mimeType.startsWith('image/')
         ? {
@@ -1219,8 +1382,10 @@ function buildMultimodalContentCandidates(
         media_type: att.mimeType,
         data: att.base64Data || '',
       },
-    })),
-  ];
+    }))
+  );
+
+  return candidates;
 }
 
 /**
@@ -1246,6 +1411,7 @@ export function streamDshMuxReply(
 
   return new Promise((resolve, reject) => {
     let settled = false;
+    let wsOpened = false;
     let diagnosingError = false;
     let accumulated = '';
     let accumulatedThinking = '';
@@ -1343,8 +1509,9 @@ export function streamDshMuxReply(
     }
 
     ws.onopen = async () => {
+      wsOpened = true;
       window.clearTimeout(connectTimer);
-      resetIdleTimer(45000);
+      resetIdleTimer(60000);
       if (!ws) return;
       mux = new SingleTurnMuxHelper(ws);
 
@@ -1485,12 +1652,31 @@ export function streamDshMuxReply(
 
         startFollow();
 
-        // Step 3: Submit prompt (with text + multimodal image/file attachments) via HTTP POST unary carrier
+        // Step 3: Upload binary/image attachments via /api/session/uploadFileBinary if present
+        const mediaAttachments = (options?.attachments || []).filter(
+          (att) => !att.textContent && (att.base64Data || att.dataUrl)
+        );
+        const uploadedReceipts: Array<{ receiptId: string; att: ChatAttachment }> = [];
+        if (mediaAttachments.length > 0) {
+          resetIdleTimer(90000);
+          for (const att of mediaAttachments) {
+            const receiptId = await uploadAttachmentToDsh(config, sessionId, att, signal);
+            if (receiptId) {
+              uploadedReceipts.push({ receiptId, att });
+            }
+          }
+        }
+
+        // Submit prompt (with receiptId or fallback multimodal content) via HTTP POST unary carrier
         const requestId = mintStreamId();
         const clientTimeZone = getClientTimeZone();
         sawPostPromptEvent = true;
 
-        const contentCandidates = buildMultimodalContentCandidates(prompt, options?.attachments);
+        const contentCandidates = buildMultimodalContentCandidates(
+          prompt,
+          options?.attachments,
+          uploadedReceipts
+        );
         let promptRes: unknown;
         let lastPromptError: Error | null = null;
 
@@ -1589,12 +1775,16 @@ export function streamDshMuxReply(
     };
 
     ws.onerror = () => {
-      diagnosingError = true;
-      window.clearTimeout(connectTimer);
-      window.clearTimeout(idleTimer);
-      void diagnoseWsHandshakeFailure(config.serverUrl, wsUrl).then((detail) => {
-        fail(new Error(detail));
-      });
+      if (settled) return;
+      if (!wsOpened) {
+        diagnosingError = true;
+        window.clearTimeout(connectTimer);
+        window.clearTimeout(idleTimer);
+        void diagnoseWsHandshakeFailure(config.serverUrl, wsUrl).then((detail) => {
+          fail(new Error(detail));
+        });
+      }
+      // If ws was already open, let onclose or the pending HTTP prompt error report the actual failure
     };
 
     ws.onclose = (ev) => {

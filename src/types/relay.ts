@@ -1,6 +1,43 @@
-export type TabKey = 'chat' | 'goals' | 'space';
+export type TabKey = 'chat' | 'research' | 'health' | 'goals' | 'space';
 
 export type ConnectionMode = 'sandbox' | 'dsh-bridge' | 'openai-compatible';
+
+export interface AgentProfile {
+  name: string;
+  subtitle: string;
+  avatarId: string; // 'muse-pearl' | 'amber-dawn' | 'emerald-glass' | 'obsidian-ring' | 'custom'
+  customAvatarUrl?: string;
+}
+
+export interface ResearchItem {
+  id: string;
+  title: string;
+  category: 'paper' | 'experiment' | 'idea';
+  status: 'reading' | 'running' | 'writing' | 'archived';
+  progress: number; // 0 - 100
+  venueOrSource?: string;
+  url?: string;
+  notes: string;
+  updatedAt: string;
+}
+
+export interface HealthConfig {
+  sleepGoalHours: number; // e.g. 7.5
+  bedtimeTarget: string; // e.g. '23:30'
+  wakeTarget: string; // e.g. '07:00'
+  stepsGoal: number; // e.g. 8000
+  waterGoalCups: number; // e.g. 8
+  exerciseGoalMinutes: number; // e.g. 30
+  autoRemindBedtime: boolean;
+}
+
+export interface HealthDailyLog {
+  dateKey: string; // YYYY-MM-DD
+  sleepHours: number;
+  steps: number;
+  waterCups: number;
+  exerciseMinutes: number;
+}
 
 export interface ConnectionConfig {
   mode: ConnectionMode;

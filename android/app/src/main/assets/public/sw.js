@@ -90,7 +90,7 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "revision": "661ff5229832b2b5494475628a8b8e2d"
   }, {
     "url": "index.html",
-    "revision": "dae9858d63699427e16cb2a5e5056602"
+    "revision": "e57be8b4ee2ffec2bfc4885b0f0f98b2"
   }, {
     "url": "icon.svg",
     "revision": "c7dde899d57f3985dd3f8b3f3fbe5447"
@@ -110,16 +110,16 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "url": "src/assets/images/briefing_news_desk_1795619568085.jpg",
     "revision": "f0eecb18f50738b8391682ae6d5cf81d"
   }, {
-    "url": "assets/web-CEHjWC-9.js",
+    "url": "assets/web-4DvsiNIP.js",
     "revision": null
   }, {
     "url": "assets/muse_agent_avatar_1795671239700-Bt96B81X.jpg",
     "revision": null
   }, {
-    "url": "assets/index-DNqmXeII.js",
+    "url": "assets/index-DtXT4txl.js",
     "revision": null
   }, {
-    "url": "assets/index-DB4-NJRE.css",
+    "url": "assets/index-Dr8Rojqy.css",
     "revision": null
   }, {
     "url": "assets/aistudio/image_9d42f908.png",
@@ -132,6 +132,9 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "revision": null
   }, {
     "url": "assets/aistudio/image_35bb8bc6.png",
+    "revision": null
+  }, {
+    "url": "assets/aistudio/image_2d336bb4.png",
     "revision": null
   }, {
     "url": "apple-touch-icon.png",

@@ -1,6 +1,12 @@
-import { Capacitor } from '@capacitor/core';
+import { Capacitor, registerPlugin } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
 import { StatusBar, Style } from '@capacitor/status-bar';
+
+interface DshWindowBridge {
+  setWindowBackground(options: { color: string; dark: boolean }): Promise<void>;
+}
+
+const DshWindow = registerPlugin<DshWindowBridge>('DshSocket');
 
 export function isNativeApp(): boolean {
   return Capacitor.isNativePlatform();
@@ -8,16 +14,22 @@ export function isNativeApp(): boolean {
 
 export async function syncNativeStatusBar(darkMode: boolean): Promise<void> {
   if (!Capacitor.isNativePlatform()) return;
+  const color = darkMode ? '#0E0F12' : '#F8F7F4';
   try {
     await StatusBar.setOverlaysWebView({ overlay: false });
-    await StatusBar.setBackgroundColor({
-      color: darkMode ? '#0E0F12' : '#F8F7F4',
-    });
+    await StatusBar.setBackgroundColor({ color });
     await StatusBar.setStyle({
       style: darkMode ? Style.Dark : Style.Light,
     });
   } catch {
     // Ignore on platforms where StatusBar plugin is unavailable
+  }
+  try {
+    if (Capacitor.isPluginAvailable('DshSocket')) {
+      await DshWindow.setWindowBackground({ color, dark: darkMode });
+    }
+  } catch {
+    // Ignore if native window bridge is unavailable
   }
 }
 

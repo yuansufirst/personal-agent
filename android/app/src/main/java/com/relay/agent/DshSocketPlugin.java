@@ -1,7 +1,14 @@
 package com.relay.agent;
 
+import android.graphics.Color;
+import android.util.Base64;
+import android.view.View;
+import android.view.Window;
+
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -9,18 +16,24 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+import java.io.IOException;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
+import okhttp3.Call;
+import okhttp3.Callback;
+import okhttp3.MediaType;
+import okhttp3.MultipartBody;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
+import okhttp3.RequestBody;
 import okhttp3.Response;
 import okhttp3.WebSocket;
 import okhttp3.WebSocketListener;
 
 /**
- * Native OkHttp WebSocket bridge for DeepSeek Harness (/api/remote.mux).
+ * Native OkHttp WebSocket & binary upload bridge for DeepSeek Harness.
  * Bypasses Android WebView's cross-origin / Sec-Fetch-Site: cross-site restrictions
  * while routing seamlessly through Android's Tailscale VPN interface.
  */
@@ -35,7 +48,7 @@ public class DshSocketPlugin extends Plugin {
         client = new OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
-            .writeTimeout(30, TimeUnit.SECONDS)
+            .writeTimeout(45, TimeUnit.SECONDS)
             .pingInterval(25, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build();
@@ -139,6 +152,125 @@ public class DshSocketPlugin extends Plugin {
             }
         }
         call.resolve();
+    }
+
+    /**
+     * Uploads raw binary or multipart file bytes natively via OkHttp so images/files
+     * bypass WebView CORS and CapacitorHttp Blob serialization quirks.
+     */
+    @PluginMethod
+    public void uploadBinary(PluginCall call) {
+        String url = call.getString("url");
+        String base64Data = call.getString("base64Data");
+        String mimeType = call.getString("mimeType", "application/octet-stream");
+        String filename = call.getString("filename", "upload.bin");
+        String sessionId = call.getString("sessionId", "");
+        String mode = call.getString("mode", "raw"); // "raw" or "multipart"
+        String origin = call.getString("origin");
+
+        if (url == null || url.isEmpty() || base64Data == null || base64Data.isEmpty()) {
+            call.reject("Missing url or base64Data");
+            return;
+        }
+
+        byte[] bytes;
+        try {
+            bytes = Base64.decode(base64Data, Base64.DEFAULT);
+        } catch (IllegalArgumentException e) {
+            call.reject("Invalid base64Data: " + e.getMessage());
+            return;
+        }
+
+        MediaType mediaType = MediaType.parse(mimeType != null ? mimeType : "application/octet-stream");
+        RequestBody body;
+        if ("multipart".equals(mode)) {
+            MultipartBody.Builder mb = new MultipartBody.Builder().setType(MultipartBody.FORM);
+            if (sessionId != null && !sessionId.isEmpty()) {
+                mb.addFormDataPart("sessionId", sessionId);
+            }
+            mb.addFormDataPart("filename", filename != null ? filename : "upload.bin");
+            mb.addFormDataPart("mimeType", mimeType != null ? mimeType : "application/octet-stream");
+            mb.addFormDataPart(
+                "file",
+                filename != null ? filename : "upload.bin",
+                RequestBody.create(bytes, mediaType)
+            );
+            body = mb.build();
+        } else {
+            body = RequestBody.create(bytes, mediaType);
+        }
+
+        Request.Builder reqBuilder = new Request.Builder()
+            .url(url)
+            .post(body);
+        if (origin != null && !origin.isEmpty()) {
+            reqBuilder.header("Origin", origin);
+        }
+        if ("raw".equals(mode)) {
+            if (filename != null && !filename.isEmpty()) {
+                reqBuilder.header("X-File-Name", filename);
+                reqBuilder.header("Content-Disposition", "attachment; filename=\"" + filename.replace("\"", "") + "\"");
+            }
+            if (sessionId != null && !sessionId.isEmpty()) {
+                reqBuilder.header("X-Session-Id", sessionId);
+            }
+        }
+
+        client.newCall(reqBuilder.build()).enqueue(new Callback() {
+            @Override
+            public void onFailure(@NonNull Call httpCall, @NonNull IOException e) {
+                call.reject(e.getMessage() != null ? e.getMessage() : "Upload network error");
+            }
+
+            @Override
+            public void onResponse(@NonNull Call httpCall, @NonNull Response response) throws IOException {
+                try (Response res = response) {
+                    String text = res.body() != null ? res.body().string() : "";
+                    JSObject out = new JSObject();
+                    out.put("status", res.code());
+                    out.put("ok", res.isSuccessful());
+                    out.put("body", text);
+                    call.resolve(out);
+                }
+            }
+        });
+    }
+
+    /**
+     * Keeps the Android root inset background and system bar icon luminance in sync
+     * with light/dark mode on Android 10–15 edge-to-edge windows.
+     */
+    @PluginMethod
+    public void setWindowBackground(PluginCall call) {
+        String colorHex = call.getString("color", "#F8F7F4");
+        boolean dark = Boolean.TRUE.equals(call.getBoolean("dark", false));
+        if (getActivity() == null) {
+            call.resolve();
+            return;
+        }
+        getActivity().runOnUiThread(() -> {
+            try {
+                int parsed = Color.parseColor(colorHex != null ? colorHex : "#F8F7F4");
+                View contentView = getActivity().findViewById(android.R.id.content);
+                if (contentView != null) {
+                    contentView.setBackgroundColor(parsed);
+                }
+                Window window = getActivity().getWindow();
+                if (window != null) {
+                    window.setStatusBarColor(parsed);
+                    window.setNavigationBarColor(parsed);
+                    WindowInsetsControllerCompat controller =
+                        WindowCompat.getInsetsController(window, window.getDecorView());
+                    if (controller != null) {
+                        controller.setAppearanceLightStatusBars(!dark);
+                        controller.setAppearanceLightNavigationBars(!dark);
+                    }
+                }
+            } catch (Exception ignored) {
+                // ignore invalid color or unsupported API
+            }
+            call.resolve();
+        });
     }
 
     @Override

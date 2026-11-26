@@ -4,6 +4,15 @@ interface DshSocketPlugin {
   connect(options: { id: string; url: string; origin?: string }): Promise<void>;
   send(options: { id: string; data: string }): Promise<void>;
   close(options: { id: string; code?: number; reason?: string }): Promise<void>;
+  uploadBinary(options: {
+    url: string;
+    base64Data: string;
+    mimeType: string;
+    filename: string;
+    sessionId?: string;
+    mode?: 'raw' | 'multipart';
+    origin?: string;
+  }): Promise<{ status: number; ok: boolean; body: string }>;
   addListener(
     eventName: 'wsOpen',
     listenerFunc: (event: { id: string }) => void
@@ -41,10 +50,10 @@ const WS_CLOSED = 3;
 
 let socketSeq = 0;
 
-function deriveSameOrigin(wsUrl: string): string | undefined {
+function deriveSameOrigin(rawUrl: string): string | undefined {
   try {
-    const parsed = new URL(wsUrl);
-    const proto = parsed.protocol === 'wss:' ? 'https:' : 'http:';
+    const parsed = new URL(rawUrl);
+    const proto = parsed.protocol === 'wss:' || parsed.protocol === 'https:' ? 'https:' : 'http:';
     return `${proto}//${parsed.host}`;
   } catch {
     return undefined;
@@ -154,15 +163,30 @@ class NativeCapacitorWebSocket implements DshWebSocketLike {
   }
 }
 
-/**
- * Creates a WebSocket for DeepSeek Harness `/api/remote.mux`.
- * - In the Android APK, uses the native OkHttp `DshSocket` plugin so Tailscale
- *   WebSocket upgrades carry a matching same-origin header and zero `Sec-Fetch-Site: cross-site` 403s.
- * - In Web/PWA environments, uses the standard browser `WebSocket`.
- */
 export function createDshWebSocket(wsUrl: string): DshWebSocketLike {
   if (Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('DshSocket')) {
     return new NativeCapacitorWebSocket(wsUrl);
   }
   return new WebSocket(wsUrl);
+}
+
+/**
+ * Uses OkHttp native upload in the Android APK (bypassing CapacitorHttp Blob quirks and CORS),
+ * or returns null on web so caller uses standard fetch().
+ */
+export async function uploadBinaryNativeIfAvailable(options: {
+  url: string;
+  base64Data: string;
+  mimeType: string;
+  filename: string;
+  sessionId?: string;
+  mode: 'raw' | 'multipart';
+}): Promise<{ status: number; ok: boolean; body: string } | null> {
+  if (!Capacitor.isNativePlatform() || !Capacitor.isPluginAvailable('DshSocket')) {
+    return null;
+  }
+  return DshSocket.uploadBinary({
+    ...options,
+    origin: deriveSameOrigin(options.url),
+  });
 }

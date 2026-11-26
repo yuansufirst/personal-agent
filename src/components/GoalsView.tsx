@@ -169,7 +169,7 @@ export const GoalsView: React.FC<GoalsViewProps> = ({
           ) : (
             <form
               onSubmit={handleCreateGoal}
-              className="rounded-3xl border border-stone-200/80 bg-white p-5 shadow-xs dark:border-zinc-800 dark:bg-[#15171C] space-y-3.5"
+              className="mac-card rounded-3xl p-5 space-y-3.5"
             >
               <input
                 type="text"
@@ -212,7 +212,7 @@ export const GoalsView: React.FC<GoalsViewProps> = ({
           )}
 
           {goals.length === 0 ? (
-            <div className="rounded-3xl border border-stone-200/80 bg-white px-6 py-16 text-center dark:border-zinc-800 dark:bg-[#15171C]">
+            <div className="mac-card rounded-3xl px-6 py-16 text-center">
               <Target className="mx-auto h-7 w-7 text-stone-300 dark:text-zinc-700" />
               <p className="mt-3 text-sm font-medium text-zinc-700 dark:text-zinc-300">
                 还没有正在推进的目标
@@ -231,7 +231,7 @@ export const GoalsView: React.FC<GoalsViewProps> = ({
                 return (
                   <div
                     key={goal.id}
-                    className="rounded-3xl border border-stone-200/80 bg-white p-5 transition-colors hover:border-stone-300 dark:border-zinc-800 dark:bg-[#15171C] dark:hover:border-zinc-700"
+                    className="mac-card rounded-3xl p-5"
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
@@ -325,7 +325,7 @@ export const GoalsView: React.FC<GoalsViewProps> = ({
           {/* Clean Quick Add Reminder */}
           <form
             onSubmit={handleCreateReminder}
-            className="rounded-3xl border border-stone-200/80 bg-white p-4 sm:p-5 dark:border-zinc-800 dark:bg-[#15171C] space-y-3"
+            className="mac-card rounded-3xl p-4 sm:p-5 space-y-3"
           >
             <div className="flex flex-col gap-2.5 sm:flex-row">
               <input
@@ -401,7 +401,7 @@ export const GoalsView: React.FC<GoalsViewProps> = ({
           </div>
 
           {filteredReminders.length === 0 ? (
-            <div className="rounded-3xl border border-stone-200/80 bg-white px-6 py-14 text-center dark:border-zinc-800 dark:bg-[#15171C]">
+            <div className="mac-card rounded-3xl px-6 py-14 text-center">
               <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
                 当前分组暂无提醒
               </p>
@@ -410,7 +410,7 @@ export const GoalsView: React.FC<GoalsViewProps> = ({
               </p>
             </div>
           ) : (
-            <div className="divide-y divide-stone-100 rounded-3xl border border-stone-200/80 bg-white dark:divide-zinc-800/80 dark:border-zinc-800 dark:bg-[#15171C]">
+            <div className="mac-card divide-y divide-stone-100 rounded-3xl dark:divide-zinc-800/80">
               {filteredReminders.map((item) => (
                 <div
                   key={item.id}

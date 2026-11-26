@@ -123,7 +123,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
       {subTab === 'environment' ? (
         <div className="space-y-6">
           {/* Active Agent Endpoint Card */}
-          <div className="flex flex-col gap-3 rounded-3xl border border-stone-200/80 bg-white p-5 sm:flex-row sm:items-center sm:justify-between dark:border-zinc-800 dark:bg-[#15171C]">
+          <div className="mac-card flex flex-col gap-3 rounded-3xl p-5 sm:flex-row sm:items-center sm:justify-between">
             <div className="min-w-0">
               <div className="text-xs font-medium text-zinc-500 dark:text-zinc-400">
                 当前云端 Agent 通道
@@ -162,7 +162,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                 return (
                   <div
                     key={node.id}
-                    className="rounded-3xl border border-stone-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-[#15171C]"
+                    className="mac-card rounded-3xl p-4"
                   >
                     <div className="flex items-start justify-between gap-2">
                       <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-stone-100 text-zinc-700 dark:bg-zinc-900 dark:text-zinc-300">
@@ -225,7 +225,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                   key={m.id}
                   type="button"
                   onClick={() => onRunMacro(m)}
-                  className="group flex items-center justify-between gap-3 rounded-2xl border border-stone-200/80 bg-white px-4 py-3.5 text-left transition-colors hover:border-[#1B6EF3]/50 dark:border-zinc-800 dark:bg-[#15171C] dark:hover:border-blue-500/50"
+                  className="mac-card group flex items-center justify-between gap-3 rounded-2xl px-4 py-3.5 text-left"
                 >
                   <div className="min-w-0">
                     <div className="text-sm font-medium text-zinc-900 group-hover:text-[#1B6EF3] dark:text-zinc-100 dark:group-hover:text-blue-400">
@@ -261,7 +261,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
             </div>
 
             {briefings.length === 0 ? (
-              <div className="rounded-3xl border border-stone-200/80 bg-white px-6 py-10 text-center dark:border-zinc-800 dark:bg-[#15171C]">
+              <div className="mac-card rounded-3xl px-6 py-10 text-center">
                 <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
                   暂无已收藏简报
                 </p>
@@ -274,7 +274,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                 {briefings.map((item) => (
                   <article
                     key={item.id}
-                    className="flex flex-col justify-between rounded-3xl border border-stone-200/80 bg-white p-4 dark:border-zinc-800 dark:bg-[#15171C]"
+                    className="mac-card flex flex-col justify-between rounded-3xl p-4"
                   >
                     <div>
                       <div className="flex items-center justify-between gap-2 text-[11px] text-zinc-400">
@@ -341,7 +341,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
             </div>
 
             {files.length === 0 ? (
-              <div className="rounded-3xl border border-stone-200/80 bg-white px-6 py-10 text-center dark:border-zinc-800 dark:bg-[#15171C]">
+              <div className="mac-card rounded-3xl px-6 py-10 text-center">
                 <p className="text-sm font-medium text-zinc-700 dark:text-zinc-300">
                   暂无文件记录
                 </p>
@@ -350,7 +350,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                 </p>
               </div>
             ) : (
-              <div className="divide-y divide-stone-100 rounded-3xl border border-stone-200/80 bg-white dark:divide-zinc-800/80 dark:border-zinc-800 dark:bg-[#15171C]">
+              <div className="mac-card divide-y divide-stone-100 rounded-3xl dark:divide-zinc-800/80">
                 {files.map((file) => (
                   <div
                     key={file.id}
