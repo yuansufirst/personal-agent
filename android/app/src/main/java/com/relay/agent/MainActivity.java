@@ -23,7 +23,7 @@ public class MainActivity extends BridgeActivity {
         WindowCompat.setDecorFitsSystemWindows(getWindow(), false);
         View contentView = findViewById(android.R.id.content);
         if (contentView != null) {
-            contentView.setBackgroundColor(Color.parseColor("#F8F7F4"));
+            contentView.setBackgroundColor(Color.parseColor("#14171D"));
             ViewCompat.setOnApplyWindowInsetsListener(contentView, (view, windowInsets) -> {
                 Insets bars = windowInsets.getInsets(
                     WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout()

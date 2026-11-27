@@ -12,6 +12,7 @@ import {
 } from 'lucide-react';
 import type { AgentProfile, ConnectionConfig } from '../types/relay';
 import { AVATAR_PRESETS, resolveAvatarSrc } from '../services/avatarPresets';
+import { GranularDotMatrix } from './GranularDotMatrix';
 
 interface SettingsModalProps {
   open: boolean;
@@ -118,7 +119,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}
           transition={{ duration: 0.18 }}
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/45 backdrop-blur-sm sm:items-center sm:p-4"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm sm:items-center sm:p-4"
           onClick={onClose}
         >
           <motion.div
@@ -127,205 +128,232 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
             exit={{ opacity: 0, y: 20, scale: 0.97 }}
             transition={{ type: 'spring', stiffness: 380, damping: 32 }}
             onClick={(e) => e.stopPropagation()}
-            className="mac-card flex max-h-[88vh] w-full max-w-md flex-col overflow-hidden rounded-t-3xl border border-stone-200/80 dark:border-zinc-800 sm:rounded-3xl"
+            className="board-backdrop flex max-h-[88vh] w-full max-w-md flex-col overflow-hidden rounded-t-[28px] border border-[var(--relay-tile-border)] text-[var(--relay-text)] shadow-2xl sm:rounded-[28px]"
           >
-            <div className="mx-auto mt-2.5 h-1 w-10 shrink-0 rounded-full bg-stone-300 dark:bg-zinc-700 sm:hidden" />
+            <div className="mx-auto mt-2.5 h-1 w-10 shrink-0 rounded-full bg-white/25 sm:hidden" />
 
-            <div className="flex items-center justify-between border-b border-stone-200/70 px-5 py-3.5 dark:border-zinc-800/80">
-              <h2 className="text-[15px] font-semibold text-zinc-950 dark:text-zinc-50">
-                设置与个性化
+            {/* Flush Header */}
+            <div className="flex items-center justify-between border-b border-[var(--relay-tile-border)]/50 px-5 py-3.5">
+              <h2 className="text-[15px] font-semibold tracking-tight text-[var(--relay-text)]">
+                设置
               </h2>
               <button
                 type="button"
                 onClick={onClose}
                 aria-label="关闭设置"
-                className="flex h-9 w-9 items-center justify-center rounded-xl text-zinc-500 transition-colors hover:bg-stone-200/60 dark:hover:bg-zinc-800"
+                className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--relay-text-muted)] transition-colors hover:bg-white/10 hover:text-[var(--relay-text)]"
               >
                 <X className="h-4 w-4" />
               </button>
             </div>
 
-            <div className="flex-1 overflow-y-auto px-5 py-5 space-y-6">
-              {/* Section 1: Assistant Avatar & Name */}
-              <section className="space-y-3.5">
-                <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
-                  助理形象与名称
-                </div>
-
-                <div className="flex items-center gap-3.5">
-                  <div className="relative shrink-0">
-                    <img
-                      src={currentAvatarSrc}
-                      alt={profile.name}
-                      className="h-14 w-14 rounded-full object-cover ring-2 ring-white shadow-sm dark:ring-zinc-800"
-                    />
-                    <input
-                      ref={fileInputRef}
-                      type="file"
-                      accept="image/*"
-                      className="hidden"
-                      onChange={(e) => void handleUploadAvatar(e)}
-                    />
-                    <button
-                      type="button"
-                      onClick={() => fileInputRef.current?.click()}
-                      aria-label="上传自定义头像"
-                      className="absolute -right-1 -bottom-1 flex h-6 w-6 items-center justify-center rounded-full bg-zinc-950 text-white shadow-sm transition-transform hover:scale-105 dark:bg-[#1B6EF3]"
-                    >
-                      <Camera className="h-3 w-3" />
-                    </button>
-                  </div>
-
-                  <div className="min-w-0 flex-1 space-y-2">
-                    <input
-                      type="text"
-                      value={nameDraft}
-                      onChange={(e) => setNameDraft(e.target.value)}
-                      onBlur={handleSaveName}
-                      onKeyDown={(e) => e.key === 'Enter' && handleSaveName()}
-                      placeholder="助理名称（如 Relay、Muse）"
-                      className="min-h-[38px] w-full rounded-xl border border-stone-200/90 bg-[#F8F7F4] px-3 py-1.5 text-sm font-medium text-zinc-900 focus:border-[#1B6EF3] focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-[#0E0F12] dark:text-zinc-100"
-                    />
-                    <input
-                      type="text"
-                      value={subtitleDraft}
-                      onChange={(e) => setSubtitleDraft(e.target.value)}
-                      onBlur={handleSaveName}
-                      onKeyDown={(e) => e.key === 'Enter' && handleSaveName()}
-                      placeholder="一句话简介"
-                      className="min-h-[34px] w-full rounded-xl border border-stone-200/90 bg-[#F8F7F4] px-3 py-1 text-xs text-zinc-600 focus:border-[#1B6EF3] focus:bg-white focus:outline-none dark:border-zinc-700 dark:bg-[#0E0F12] dark:text-zinc-300"
-                    />
-                  </div>
-                </div>
-
-                <div className="grid grid-cols-4 gap-2 pt-1">
-                  {AVATAR_PRESETS.map((preset) => {
-                    const selected = profile.avatarId === preset.id;
-                    return (
+            <div className="flex-1 overflow-y-auto px-4 py-4 space-y-4">
+              {/* Profile Hero Granular Magnetic Tile */}
+              <section
+                className="settings-grain-tile rounded-[22px] p-4"
+                style={
+                  {
+                    '--tile-tint': 'var(--tint-blue)',
+                    '--tile-angle': '172deg',
+                  } as React.CSSProperties
+                }
+              >
+                <GranularDotMatrix pitch={8.5} bandStart={0.44} bandEnd={0.86} />
+                <div className="relative z-10 space-y-3.5">
+                  <div className="flex items-center gap-3.5">
+                    <div className="relative shrink-0">
+                      <img
+                        src={currentAvatarSrc}
+                        alt={profile.name}
+                        className="h-14 w-14 rounded-full object-cover ring-2 ring-white/40 shadow-md"
+                      />
+                      <input
+                        ref={fileInputRef}
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        onChange={(e) => void handleUploadAvatar(e)}
+                      />
                       <button
-                        key={preset.id}
                         type="button"
-                        onClick={() => {
-                          onUpdateProfile({ ...profile, avatarId: preset.id });
-                          onShowToast(`已切换为「${preset.label}」头像`);
-                        }}
-                        className={`flex flex-col items-center gap-1.5 rounded-2xl border p-2 transition-all ${
-                          selected
-                            ? 'border-[#1B6EF3] bg-blue-50/50 dark:bg-blue-950/30'
-                            : 'border-stone-200/80 bg-white/60 hover:border-stone-300 dark:border-zinc-800 dark:bg-zinc-900/60'
-                        }`}
+                        onClick={() => fileInputRef.current?.click()}
+                        aria-label="上传自定义头像"
+                        className="absolute -right-1 -bottom-1 flex h-6 w-6 items-center justify-center rounded-full bg-white text-[#0D1017] shadow-md transition-transform hover:scale-105"
                       >
-                        <div className="relative">
-                          <img
-                            src={preset.src}
-                            alt={preset.label}
-                            className="h-10 w-10 rounded-full object-cover"
-                          />
-                          {selected && (
-                            <span className="absolute -right-0.5 -bottom-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-[#1B6EF3] text-white">
-                              <Check className="h-2.5 w-2.5" />
-                            </span>
-                          )}
-                        </div>
-                        <span className="text-[11px] font-medium text-zinc-600 dark:text-zinc-300">
-                          {preset.label}
-                        </span>
+                        <Camera className="h-3 w-3" />
                       </button>
-                    );
-                  })}
-                </div>
-              </section>
-
-              {/* Section 2: Appearance Light/Dark */}
-              <section className="space-y-2.5 border-t border-stone-200/70 pt-5 dark:border-zinc-800/80">
-                <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
-                  外观主题
-                </div>
-                <div className="grid grid-cols-2 gap-2.5">
-                  <button
-                    type="button"
-                    onClick={() => onToggleDarkMode(false)}
-                    className={`flex min-h-[48px] items-center justify-center gap-2 rounded-2xl border px-3 py-2.5 text-xs font-medium transition-all ${
-                      !darkMode
-                        ? 'border-[#1B6EF3] bg-white text-zinc-950 shadow-xs dark:bg-zinc-800 dark:text-zinc-50'
-                        : 'border-stone-200/80 bg-[#F8F7F4]/70 text-zinc-500 hover:text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-400'
-                    }`}
-                  >
-                    <Sun className="h-4 w-4 text-amber-500" />
-                    <span>浅色暖白</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => onToggleDarkMode(true)}
-                    className={`flex min-h-[48px] items-center justify-center gap-2 rounded-2xl border px-3 py-2.5 text-xs font-medium transition-all ${
-                      darkMode
-                        ? 'border-[#1B6EF3] bg-[#1C1F26] text-zinc-50 shadow-xs'
-                        : 'border-stone-200/80 bg-[#F8F7F4]/70 text-zinc-500 hover:text-zinc-900 dark:border-zinc-800 dark:bg-zinc-900/50 dark:text-zinc-400'
-                    }`}
-                  >
-                    <Moon className="h-4 w-4 text-blue-400" />
-                    <span>深色曜石</span>
-                  </button>
-                </div>
-              </section>
-
-              {/* Section 3: Connection & Tailscale Protocol */}
-              <section className="space-y-2.5 border-t border-stone-200/70 pt-5 dark:border-zinc-800/80">
-                <div className="text-xs font-semibold text-zinc-500 dark:text-zinc-400">
-                  云端通道与协议
-                </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    onClose();
-                    onOpenConnection();
-                  }}
-                  className="flex min-h-[54px] w-full items-center justify-between gap-3 rounded-2xl border border-stone-200/90 bg-white/80 px-4 py-3 text-left transition-colors hover:border-[#1B6EF3]/60 dark:border-zinc-800 dark:bg-[#181A20] dark:hover:border-blue-500/60"
-                >
-                  <div className="flex min-w-0 items-center gap-3">
-                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-[#1B6EF3] dark:bg-blue-950/50 dark:text-blue-400">
-                      <Link2 className="h-4 w-4" />
                     </div>
-                    <div className="min-w-0">
-                      <div className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                        {config.mode === 'sandbox'
-                          ? '本地体验模式'
-                          : config.mode === 'dsh-bridge'
-                            ? 'DeepSeek Harness · Tailscale'
-                            : 'OpenAI 兼容接口'}
-                      </div>
-                      <div className="mt-0.5 truncate font-mono-tabular text-[11px] text-zinc-400">
-                        {config.serverUrl || '点击配置服务器地址与会话参数'}
-                      </div>
+
+                    <div className="min-w-0 flex-1 space-y-2">
+                      <input
+                        type="text"
+                        value={nameDraft}
+                        onChange={(e) => setNameDraft(e.target.value)}
+                        onBlur={handleSaveName}
+                        onKeyDown={(e) => e.key === 'Enter' && handleSaveName()}
+                        placeholder="助理名称"
+                        className="min-h-[38px] w-full rounded-xl border border-white/15 bg-black/45 px-3 py-1.5 text-sm font-medium text-[var(--relay-text)] backdrop-blur-xs focus:border-white/45 focus:outline-none"
+                      />
+                      <input
+                        type="text"
+                        value={subtitleDraft}
+                        onChange={(e) => setSubtitleDraft(e.target.value)}
+                        onBlur={handleSaveName}
+                        onKeyDown={(e) => e.key === 'Enter' && handleSaveName()}
+                        placeholder="简介"
+                        className="min-h-[34px] w-full rounded-xl border border-white/12 bg-black/45 px-3 py-1 text-xs text-[var(--relay-text-muted)] backdrop-blur-xs focus:border-white/40 focus:outline-none"
+                      />
                     </div>
                   </div>
-                  <ChevronRight className="h-4 w-4 shrink-0 text-zinc-400" />
-                </button>
 
+                  {/* 4 Avatar Preset Mini Tiles */}
+                  <div className="grid grid-cols-4 gap-2">
+                    {AVATAR_PRESETS.map((preset) => {
+                      const selected = profile.avatarId === preset.id;
+                      return (
+                        <button
+                          key={preset.id}
+                          type="button"
+                          onClick={() => {
+                            onUpdateProfile({ ...profile, avatarId: preset.id });
+                            onShowToast(`已切换为「${preset.label}」头像`);
+                          }}
+                          className={`flex flex-col items-center gap-1.5 rounded-2xl border p-2 backdrop-blur-xs transition-all active:scale-95 ${
+                            selected
+                              ? 'border-white/50 bg-black/45 shadow-sm'
+                              : 'border-white/12 bg-black/30 opacity-85 hover:opacity-100'
+                          }`}
+                        >
+                          <div className="relative">
+                            <img
+                              src={preset.src}
+                              alt={preset.label}
+                              className="h-9 w-9 rounded-full object-cover"
+                            />
+                            {selected && (
+                              <span className="absolute -right-0.5 -bottom-0.5 flex h-4 w-4 items-center justify-center rounded-full bg-white text-[#0D1017]">
+                                <Check className="h-2.5 w-2.5" />
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[10px] font-medium text-[var(--relay-text-muted)]">
+                            {preset.label}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </section>
+
+              {/* Appearance 2-Tile Pair with Transition-Zone Black Square Matrix */}
+              <div className="grid grid-cols-2 gap-3">
                 <button
                   type="button"
-                  onClick={() => {
-                    onClose();
-                    onOpenDeviceHub();
-                  }}
-                  className="flex min-h-[54px] w-full items-center justify-between gap-3 rounded-2xl border border-stone-200/90 bg-white/80 px-4 py-3 text-left transition-colors hover:border-[#1B6EF3]/60 dark:border-zinc-800 dark:bg-[#181A20] dark:hover:border-blue-500/60"
+                  onClick={() => onToggleDarkMode(false)}
+                  style={
+                    {
+                      '--tile-tint': 'var(--tint-amber)',
+                      '--tile-angle': '164deg',
+                    } as React.CSSProperties
+                  }
+                  className={`settings-grain-tile flex min-h-[76px] flex-col items-center justify-center gap-1.5 rounded-[20px] p-3 text-xs font-medium active:scale-95 ${
+                    !darkMode
+                      ? 'mini-tile-active text-[var(--relay-text)]'
+                      : 'text-[var(--relay-text-muted)]'
+                  }`}
                 >
-                  <div className="flex min-w-0 items-center gap-3">
-                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600 dark:bg-emerald-950/50 dark:text-emerald-400">
-                      <Smartphone className="h-4 w-4" />
+                  <GranularDotMatrix pitch={9} />
+                  <Sun className="relative z-10 h-5 w-5 text-[var(--accent-amber)]" />
+                  <span className="relative z-10">浅色柔纸</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onToggleDarkMode(true)}
+                  style={
+                    {
+                      '--tile-tint': 'var(--tint-violet)',
+                      '--tile-angle': '192deg',
+                    } as React.CSSProperties
+                  }
+                  className={`settings-grain-tile flex min-h-[76px] flex-col items-center justify-center gap-1.5 rounded-[20px] p-3 text-xs font-medium active:scale-95 ${
+                    darkMode
+                      ? 'mini-tile-active text-[var(--relay-text)]'
+                      : 'text-[var(--relay-text-muted)]'
+                  }`}
+                >
+                  <GranularDotMatrix pitch={9} />
+                  <Moon className="relative z-10 h-5 w-5 text-[var(--accent-indigo)]" />
+                  <span className="relative z-10">暗夜底辉</span>
+                </button>
+              </div>
+
+              {/* Channel & Device Capability Granular Magnetic Tiles */}
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenConnection();
+                }}
+                style={
+                  {
+                    '--tile-tint': 'var(--tint-cyan)',
+                    '--tile-angle': '184deg',
+                  } as React.CSSProperties
+                }
+                className="settings-grain-tile flex min-h-[70px] w-full items-center justify-between gap-3 rounded-[20px] px-4 py-3 text-left active:scale-[0.98]"
+              >
+                <GranularDotMatrix pitch={9} />
+                <div className="relative z-10 flex min-w-0 items-center gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-black/45 text-[var(--accent-sky)] backdrop-blur-xs">
+                    <Link2 className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-[var(--relay-text)]">
+                      {config.mode === 'sandbox'
+                        ? '本地体验模式'
+                        : config.mode === 'dsh-bridge'
+                          ? 'DeepSeek Harness · 通道'
+                          : 'OpenAI 兼容接口'}
                     </div>
-                    <div className="min-w-0">
-                      <div className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                        手机系统能力与权限接入
-                      </div>
-                      <div className="mt-0.5 truncate text-[11px] text-zinc-400">
-                        剪贴板 · 日历 · 闹钟 · 通知监听 · 短信 · 定位 · 文件
-                      </div>
+                    <div className="mt-0.5 truncate font-mono-tabular text-[11px] text-[var(--relay-text-muted)]">
+                      {config.serverUrl || '配置服务器地址'}
                     </div>
                   </div>
-                  <ChevronRight className="h-4 w-4 shrink-0 text-zinc-400" />
-                </button>
-              </section>
+                </div>
+                <ChevronRight className="relative z-10 h-4 w-4 shrink-0 text-[var(--relay-text-faint)]" />
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onOpenDeviceHub();
+                }}
+                style={
+                  {
+                    '--tile-tint': 'var(--tint-emerald)',
+                    '--tile-angle': '168deg',
+                  } as React.CSSProperties
+                }
+                className="settings-grain-tile flex min-h-[70px] w-full items-center justify-between gap-3 rounded-[20px] px-4 py-3 text-left active:scale-[0.98]"
+              >
+                <GranularDotMatrix pitch={9} />
+                <div className="relative z-10 flex min-w-0 items-center gap-3">
+                  <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-black/45 text-[var(--accent-mint)] backdrop-blur-xs">
+                    <Smartphone className="h-4 w-4" />
+                  </div>
+                  <div className="min-w-0">
+                    <div className="text-xs font-semibold text-[var(--relay-text)]">
+                      手机系统能力接入
+                    </div>
+                    <div className="mt-0.5 truncate text-[11px] text-[var(--relay-text-muted)]">
+                      剪贴板 · 日历 · 闹钟 · 通知 · 定位 · 文件
+                    </div>
+                  </div>
+                </div>
+                <ChevronRight className="relative z-10 h-4 w-4 shrink-0 text-[var(--relay-text-faint)]" />
+              </button>
             </div>
           </motion.div>
         </motion.div>

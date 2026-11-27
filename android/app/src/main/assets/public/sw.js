@@ -90,7 +90,7 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "revision": "661ff5229832b2b5494475628a8b8e2d"
   }, {
     "url": "index.html",
-    "revision": "dabe9b43dd6f01e651bf7e114e4a0978"
+    "revision": "788f442e59e28c9f73a8f6597c78720d"
   }, {
     "url": "icon.svg",
     "revision": "c7dde899d57f3985dd3f8b3f3fbe5447"
@@ -110,16 +110,16 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "url": "src/assets/images/briefing_news_desk_1795619568085.jpg",
     "revision": "f0eecb18f50738b8391682ae6d5cf81d"
   }, {
-    "url": "assets/web-BHN3p6ZK.js",
+    "url": "assets/web-Ba94oG4a.js",
     "revision": null
   }, {
     "url": "assets/muse_agent_avatar_1795671239700-Bt96B81X.jpg",
     "revision": null
   }, {
-    "url": "assets/index-D05BIwCv.js",
+    "url": "assets/index-BugYuEqJ.js",
     "revision": null
   }, {
-    "url": "assets/index-BDdGxr6z.css",
+    "url": "assets/index-BBV9Oziw.css",
     "revision": null
   }, {
     "url": "assets/aistudio/image_9d42f908.png",

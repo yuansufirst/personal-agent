@@ -24,11 +24,7 @@ import {
 } from 'lucide-react';
 import {
   DEFAULT_CONNECTION_CONFIG,
-  INITIAL_BRIEFINGS,
-  INITIAL_FILES,
   INITIAL_MESH_NODES,
-  INITIAL_MESSAGES,
-  INITIAL_REMINDERS,
   QUICK_MACROS,
 } from './data/initialData';
 import type {
@@ -62,10 +58,12 @@ import { GoalsView } from './components/GoalsView';
 import { SpaceView } from './components/SpaceView';
 import { ResearchView } from './components/ResearchView';
 import { HealthView } from './components/HealthView';
+import { GranularDotMatrix } from './components/GranularDotMatrix';
 import { ConnectionSheet } from './components/ConnectionSheet';
 import { SettingsModal } from './components/SettingsModal';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAComponents';
 import { registerAndroidBackHandler, syncNativeStatusBar } from './services/nativeApp';
+import { applyThemeTunerToDocument, loadThemeTunerSettings } from './services/themeTuner';
 import { DEFAULT_AGENT_PROFILE, resolveAvatarSrc } from './services/avatarPresets';
 import {
   buildAutoContextHeader,
@@ -88,6 +86,25 @@ const STORAGE_KEYS = {
   nodes: 'relay_mesh_nodes_v2',
   theme: 'relay_theme_v1',
 };
+
+const DEBUG_CLEANUP_FLAG = 'relay_debug_cleared_v1';
+
+// One-time cleanup of earlier UI debug/test items (reading entries, reminders, goals, briefings)
+try {
+  if (typeof window !== 'undefined' && !localStorage.getItem(DEBUG_CLEANUP_FLAG)) {
+    [
+      STORAGE_KEYS.research,
+      STORAGE_KEYS.goals,
+      STORAGE_KEYS.reminders,
+      STORAGE_KEYS.briefings,
+      'relay_research_priority_v1',
+      'relay_goal_priority_v1',
+    ].forEach((k) => localStorage.removeItem(k));
+    localStorage.setItem(DEBUG_CLEANUP_FLAG, '1');
+  }
+} catch {
+  // ignore storage access errors
+}
 
 const DEFAULT_HEALTH_CONFIG: HealthConfig = {
   sleepGoalHours: 7.5,
@@ -166,7 +183,7 @@ export default function App() {
     const saved = loadFromStorage<string | null>(STORAGE_KEYS.theme, null);
     if (saved === 'dark') return true;
     if (saved === 'light') return false;
-    return false;
+    return true;
   });
 
   const [agentProfile, setAgentProfile] = useState<AgentProfile>(() =>
@@ -181,18 +198,6 @@ export default function App() {
     const saved = loadFromStorage<SessionRecord[]>(STORAGE_KEYS.sessions, []);
     if (saved.length > 0) return saved;
     const initialCfg = loadFromStorage(STORAGE_KEYS.config, DEFAULT_CONNECTION_CONFIG);
-    if (initialCfg.mode === 'sandbox') {
-      return [
-        {
-          id: 'sandbox-demo',
-          title: '本地体验会话',
-          updatedAt: nowTimeString(),
-          source: 'local',
-          messages: INITIAL_MESSAGES,
-          historyLoaded: true,
-        },
-      ];
-    }
     return [createEmptySession(initialCfg.sessionId)];
   });
 
@@ -226,30 +231,19 @@ export default function App() {
     return createEmptyTodayLog();
   });
 
-  const [briefings, setBriefings] = useState<BriefingItem[]>(() => {
-    const initialCfg = loadFromStorage(STORAGE_KEYS.config, DEFAULT_CONNECTION_CONFIG);
-    return loadFromStorage(
-      STORAGE_KEYS.briefings,
-      initialCfg.mode === 'sandbox' ? INITIAL_BRIEFINGS : []
-    );
-  });
+  const [briefings, setBriefings] = useState<BriefingItem[]>(() =>
+    loadFromStorage(STORAGE_KEYS.briefings, [])
+  );
 
-  const [reminders, setReminders] = useState<ReminderItem[]>(() => {
-    const initialCfg = loadFromStorage(STORAGE_KEYS.config, DEFAULT_CONNECTION_CONFIG);
-    return loadFromStorage(
-      STORAGE_KEYS.reminders,
-      initialCfg.mode === 'sandbox' ? INITIAL_REMINDERS : []
-    );
-  });
+  const [reminders, setReminders] = useState<ReminderItem[]>(() =>
+    loadFromStorage(STORAGE_KEYS.reminders, [])
+  );
 
   const [nodes, setNodes] = useState<MeshNode[]>(() =>
     loadFromStorage(STORAGE_KEYS.nodes, INITIAL_MESH_NODES)
   );
 
-  const [files, setFiles] = useState<MeshFileItem[]>(() => {
-    const initialCfg = loadFromStorage(STORAGE_KEYS.config, DEFAULT_CONNECTION_CONFIG);
-    return initialCfg.mode === 'sandbox' ? INITIAL_FILES : [];
-  });
+  const [files, setFiles] = useState<MeshFileItem[]>([]);
 
   const [deviceContextConfig, setDeviceContextConfig] = useState<DeviceContextConfig>(() =>
     loadFromStorage(STORAGE_KEYS.deviceContext, DEFAULT_DEVICE_CONTEXT_CONFIG)
@@ -300,6 +294,10 @@ export default function App() {
       setActiveSessionId(activeSession.id);
     }
   }, [activeSession.id, activeSessionId]);
+
+  useEffect(() => {
+    applyThemeTunerToDocument(loadThemeTunerSettings());
+  }, []);
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', darkMode);
@@ -742,6 +740,15 @@ export default function App() {
     );
   };
 
+  const handleUpdateResearchItem = (
+    id: string,
+    patch: Partial<Pick<ResearchItem, 'title' | 'venueOrSource' | 'url' | 'notes' | 'category'>>
+  ) => {
+    setResearchItems((prev) =>
+      prev.map((i) => (i.id === id ? { ...i, ...patch, updatedAt: todayDateKey() } : i))
+    );
+  };
+
   const handleDeleteResearch = (id: string) => {
     setResearchItems((prev) => prev.filter((i) => i.id !== id));
     showToast('已删除该科研记录');
@@ -1118,17 +1125,46 @@ export default function App() {
     label: string;
     Icon: React.ComponentType<{ className?: string }>;
     badge?: number;
+    tintVar: string;
+    accentVar: string;
   }[] = [
-    { key: 'chat', label: '对话', Icon: MessageSquare },
+    {
+      key: 'chat',
+      label: '对话',
+      Icon: MessageSquare,
+      tintVar: 'var(--tint-blue)',
+      accentVar: 'var(--accent-indigo)',
+    },
     {
       key: 'research',
       label: '科研',
       Icon: FlaskConical,
       badge: researchItems.filter((r) => r.status !== 'archived').length,
+      tintVar: 'var(--tint-violet)',
+      accentVar: 'var(--accent-violet)',
     },
-    { key: 'health', label: '健康', Icon: HeartPulse },
-    { key: 'goals', label: '目标', Icon: Target, badge: pendingGoalsOrReminders },
-    { key: 'space', label: '空间', Icon: Compass },
+    {
+      key: 'health',
+      label: '健康',
+      Icon: HeartPulse,
+      tintVar: 'var(--tint-emerald)',
+      accentVar: 'var(--accent-mint)',
+    },
+    {
+      key: 'goals',
+      label: '目标',
+      Icon: Target,
+      badge: pendingGoalsOrReminders,
+      tintVar: 'var(--tint-red)',
+      accentVar: 'var(--accent-coral)',
+    },
+    {
+      key: 'space',
+      label: '空间',
+      Icon: Compass,
+      tintVar: 'var(--tint-cyan)',
+      accentVar: 'var(--accent-sky)',
+    },
   ];
 
   const mobileBottomItems = sidebarNavItems.slice(0, 4);
@@ -1194,10 +1230,12 @@ export default function App() {
         </div>
       </div>
 
-      {/* 5-Pillar Workspace Navigation */}
-      <nav className="px-3 pt-1 pb-3 space-y-0.5">
-        {sidebarNavItems.map(({ key, label, Icon, badge }) => {
+      {/* 5-Pillar Workspace Navigation as Frosted Magnetic Tiles with Transition-Zone Black Squares */}
+      <nav className="grid grid-cols-2 gap-3 px-3 pt-1 pb-4">
+        {sidebarNavItems.map(({ key, label, Icon, badge, tintVar, accentVar }, navIdx) => {
           const active = activeTab === key;
+          const isChat = key === 'chat';
+          const navAngles = ['174deg', '162deg', '192deg', '168deg', '186deg'];
           return (
             <button
               key={key}
@@ -1206,29 +1244,29 @@ export default function App() {
                 setActiveTab(key);
                 if (isDrawer) setDrawerOpen(false);
               }}
-              className={`relative flex min-h-[42px] w-full items-center justify-between rounded-2xl px-3 py-2 text-[13px] font-medium transition-colors whitespace-nowrap ${
+              style={
+                {
+                  '--tile-tint': tintVar,
+                  '--tile-angle': navAngles[navIdx % navAngles.length],
+                } as React.CSSProperties
+              }
+              className={`settings-grain-tile relative flex items-center justify-between rounded-2xl px-3 py-2.5 text-[13px] font-medium active:scale-[0.97] whitespace-nowrap ${
+                isChat ? 'col-span-2 min-h-[48px]' : 'col-span-1 min-h-[46px]'
+              } ${
                 active
-                  ? 'text-zinc-950 dark:text-zinc-50'
-                  : 'text-zinc-600 hover:bg-stone-200/55 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800/55 dark:hover:text-zinc-100'
+                  ? 'mini-tile-active text-[var(--relay-text)]'
+                  : 'text-[var(--relay-text-muted)] hover:text-[var(--relay-text)]'
               }`}
             >
-              {active && (
-                <motion.span
-                  layoutId={isDrawer ? 'drawer-nav-pill' : 'desktop-nav-pill'}
-                  transition={{ type: 'spring', stiffness: 420, damping: 34 }}
-                  className="absolute inset-0 rounded-2xl bg-white shadow-xs dark:bg-[#1C1F26]"
-                />
-              )}
-              <span className="relative z-10 flex items-center gap-2.5">
-                <Icon
-                  className={`h-[17px] w-[17px] ${
-                    active ? 'text-[#1B6EF3] dark:text-blue-400' : ''
-                  }`}
-                />
+              <GranularDotMatrix pitch={7.5} bandStart={0.44} bandEnd={0.86} />
+              <span className="relative z-10 flex items-center gap-2">
+                <span style={{ color: active ? accentVar : undefined }}>
+                  <Icon className="h-[17px] w-[17px]" />
+                </span>
                 <span>{label}</span>
               </span>
               {badge !== undefined && badge > 0 && (
-                <span className="relative z-10 font-mono-tabular text-[11px] text-zinc-400">
+                <span className="relative z-10 font-mono-tabular text-[11px] text-[var(--relay-text-muted)]">
                   {badge}
                 </span>
               )}
@@ -1237,10 +1275,10 @@ export default function App() {
         })}
       </nav>
 
-      {/* Searchable Session History */}
-      <div className="flex min-h-0 flex-1 flex-col border-t border-stone-200/70 px-3 pt-3.5 dark:border-zinc-800/70">
-        <div className="flex items-center justify-between px-1.5">
-          <span className="text-[11px] font-semibold tracking-wide text-zinc-400">
+      {/* Embedded Session History Slot (Container is flush; each session entry is a frosted magnetic tile) */}
+      <div className="flex min-h-0 flex-1 flex-col border-t border-[var(--relay-tile-border)]/45 px-3 pt-3">
+        <div className="flex items-center justify-between px-1">
+          <span className="text-[11px] font-semibold tracking-wide text-[var(--relay-text-muted)]">
             会话列表
           </span>
           <div className="flex items-center gap-0.5">
@@ -1253,8 +1291,8 @@ export default function App() {
                   title="按 Session ID 接入"
                   className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
                     showSidebarBind
-                      ? 'bg-stone-200/90 text-[#1B6EF3] dark:bg-zinc-800 dark:text-blue-400'
-                      : 'text-zinc-400 hover:bg-stone-200/70 hover:text-zinc-800 dark:hover:bg-zinc-800 dark:hover:text-zinc-200'
+                      ? 'bg-white/15 text-[var(--accent-indigo)]'
+                      : 'text-[var(--relay-text-muted)] hover:bg-white/10 hover:text-[var(--relay-text)]'
                   }`}
                 >
                   <Hash className="h-3.5 w-3.5" />
@@ -1265,7 +1303,7 @@ export default function App() {
                   disabled={isLoadingSessions}
                   aria-label="同步云端会话"
                   title="同步云端会话"
-                  className="flex h-7 w-7 items-center justify-center rounded-lg text-zinc-400 transition-colors hover:bg-stone-200/70 hover:text-[#1B6EF3] disabled:opacity-50 dark:hover:bg-zinc-800 dark:hover:text-blue-400"
+                  className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--relay-text-muted)] transition-colors hover:bg-white/10 hover:text-[var(--accent-indigo)] disabled:opacity-50"
                 >
                   <RefreshCw
                     className={`h-3.5 w-3.5 ${isLoadingSessions ? 'animate-spin' : ''}`}
@@ -1292,12 +1330,12 @@ export default function App() {
               value={sidebarBindInput}
               onChange={(e) => setSidebarBindInput(e.target.value)}
               placeholder="粘贴 Session ID…"
-              className="min-h-[34px] min-w-0 flex-1 rounded-xl border border-stone-200 bg-white px-2.5 font-mono-tabular text-[11px] text-zinc-900 placeholder:text-zinc-400 focus:border-[#1B6EF3] focus:outline-none dark:border-zinc-700 dark:bg-[#181A20] dark:text-zinc-100"
+              className="min-h-[34px] min-w-0 flex-1 rounded-xl border border-white/15 bg-black/25 px-2.5 font-mono-tabular text-[11px] text-[var(--relay-text)] placeholder:text-[var(--relay-text-faint)] focus:border-white/40 focus:outline-none"
             />
             <button
               type="submit"
               disabled={!sidebarBindInput.trim()}
-              className="min-h-[34px] shrink-0 rounded-xl bg-zinc-950 px-2.5 text-[11px] font-medium text-white disabled:opacity-40 dark:bg-[#1B6EF3]"
+              className="min-h-[34px] shrink-0 rounded-xl bg-white px-2.5 text-[11px] font-semibold text-[#0D1017] disabled:opacity-40"
             >
               接入
             </button>
@@ -1306,33 +1344,52 @@ export default function App() {
 
         {sessions.length > 3 && (
           <div className="relative mt-2">
-            <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-zinc-400" />
+            <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-[var(--relay-text-faint)]" />
             <input
               type="text"
               value={sidebarSearch}
               onChange={(e) => setSidebarSearch(e.target.value)}
               placeholder="搜索会话…"
-              className="min-h-[34px] w-full rounded-xl border border-stone-200/80 bg-white/80 py-1 pr-2.5 pl-8 text-xs text-zinc-800 placeholder:text-zinc-400 focus:border-[#1B6EF3] focus:bg-white focus:outline-none dark:border-zinc-800 dark:bg-[#181A20] dark:text-zinc-100"
+              className="min-h-[34px] w-full rounded-xl border border-white/12 bg-black/25 py-1 pr-2.5 pl-8 text-xs text-[var(--relay-text)] placeholder:text-[var(--relay-text-faint)] focus:border-white/35 focus:outline-none"
             />
           </div>
         )}
 
-        <div className="mt-2 flex-1 overflow-y-auto space-y-0.5 pb-3">
-          {filteredSidebarSessions.map((s) => {
+        {/* Recessed Embedded Session Scroll Slot containing Transition-Square Session Tiles */}
+        <div className="mt-2.5 flex-1 overflow-y-auto space-y-3 pb-4 pr-0.5">
+          {filteredSidebarSessions.map((s, idx) => {
             const isActive = s.id === activeSession.id && activeTab === 'chat';
             const isRenaming = renamingSessionId === s.id;
+            const sessionTints = [
+              'var(--tint-cyan)',
+              'var(--tint-teal)',
+              'var(--tint-violet)',
+              'var(--tint-blue)',
+              'var(--tint-emerald)',
+              'var(--tint-rose)',
+            ];
+            const sessionAngles = ['166deg', '184deg', '172deg', '192deg', '160deg'];
 
             return (
               <div
                 key={s.id}
-                className={`group flex items-center justify-between gap-1.5 rounded-xl px-2.5 py-2 transition-colors ${
+                style={
+                  {
+                    '--tile-tint': isActive
+                      ? 'var(--tint-blue)'
+                      : sessionTints[idx % sessionTints.length],
+                    '--tile-angle': sessionAngles[idx % sessionAngles.length],
+                  } as React.CSSProperties
+                }
+                className={`settings-grain-tile group flex items-center justify-between gap-1.5 rounded-2xl px-3 py-2.5 ${
                   isActive
-                    ? 'bg-white text-zinc-950 shadow-xs dark:bg-[#1C1F26] dark:text-zinc-50'
-                    : 'text-zinc-600 hover:bg-stone-200/55 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800/50 dark:hover:text-zinc-100'
+                    ? 'mini-tile-active text-[var(--relay-text)]'
+                    : 'text-[var(--relay-text-muted)] hover:text-[var(--relay-text)]'
                 }`}
               >
+                <GranularDotMatrix pitch={7.5} bandStart={0.44} bandEnd={0.86} />
                 {isRenaming ? (
-                  <div className="flex min-w-0 flex-1 items-center gap-1">
+                  <div className="relative z-10 flex min-w-0 flex-1 items-center gap-1">
                     <input
                       type="text"
                       autoFocus
@@ -1343,7 +1400,7 @@ export default function App() {
                         if (e.key === 'Escape') setRenamingSessionId(null);
                       }}
                       onBlur={() => handleRenameSession(s.id, renameDraft)}
-                      className="min-w-0 flex-1 rounded-lg border border-[#1B6EF3] bg-[#F8F7F4] px-2 py-0.5 text-xs text-zinc-900 focus:outline-none dark:bg-[#0E0F12] dark:text-zinc-100"
+                      className="min-w-0 flex-1 rounded-lg border border-white/40 bg-black/35 px-2 py-0.5 text-xs text-[var(--relay-text)] focus:outline-none"
                     />
                     <button
                       type="button"
@@ -1352,7 +1409,7 @@ export default function App() {
                         handleRenameSession(s.id, renameDraft);
                       }}
                       aria-label="保存名称"
-                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-[#1B6EF3] text-white"
+                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-white text-[#0D1017]"
                     >
                       <Check className="h-3 w-3" />
                     </button>
@@ -1362,15 +1419,17 @@ export default function App() {
                     <button
                       type="button"
                       onClick={() => void handleSelectSession(s.id)}
-                      className="min-w-0 flex-1 text-left"
+                      className="relative z-10 min-w-0 flex-1 text-left"
                     >
-                      <div className="truncate text-xs font-medium">{s.title}</div>
-                      <div className="mt-0.5 font-mono-tabular text-[10px] text-zinc-400">
+                      <div className="truncate text-xs font-medium text-[var(--relay-text)]">
+                        {s.title}
+                      </div>
+                      <div className="mt-0.5 font-mono-tabular text-[10px] text-[var(--relay-text-faint)]">
                         {s.source === 'remote' ? '云端' : '本地'} · {s.updatedAt}
                       </div>
                     </button>
 
-                    <div className="flex items-center gap-0.5 opacity-70 sm:opacity-0 transition-opacity sm:group-hover:opacity-100">
+                    <div className="relative z-10 flex items-center gap-0.5 opacity-70 sm:opacity-0 transition-opacity sm:group-hover:opacity-100">
                       <button
                         type="button"
                         onClick={(e) => {
@@ -1379,7 +1438,7 @@ export default function App() {
                           setRenameDraft(s.title);
                         }}
                         aria-label="重命名会话"
-                        className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-400 hover:bg-stone-200/80 hover:text-zinc-800 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
+                        className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--relay-text-muted)] hover:bg-white/10 hover:text-[var(--relay-text)]"
                       >
                         <Pencil className="h-3 w-3" />
                       </button>
@@ -1391,7 +1450,7 @@ export default function App() {
                             handleDeleteSession(s.id);
                           }}
                           aria-label="删除会话"
-                          className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-400 hover:bg-stone-200/80 hover:text-rose-600 dark:hover:bg-zinc-700 dark:hover:text-rose-400"
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--relay-text-muted)] hover:bg-white/10 hover:text-[var(--accent-coral)]"
                         >
                           <Trash2 className="h-3 w-3" />
                         </button>
@@ -1405,21 +1464,30 @@ export default function App() {
         </div>
       </div>
 
-      {/* Unified Settings Dock (Houses Avatar/Name, Theme, and Connection) */}
-      <div className="space-y-2 border-t border-stone-200/70 p-3 dark:border-zinc-800/70">
+      {/* Unified Settings Dock as Granular Halftone Magnetic Tile */}
+      <div className="space-y-2 border-t border-[var(--relay-tile-border)]/45 p-3">
         <button
           type="button"
           onClick={() => {
             if (isDrawer) setDrawerOpen(false);
             setSettingsOpen(true);
           }}
-          className="flex min-h-[44px] w-full items-center justify-between gap-2.5 rounded-2xl border border-stone-200/90 bg-white px-3.5 py-2 text-xs font-medium text-zinc-800 transition-all active:scale-[0.98] hover:border-stone-300 dark:border-zinc-800 dark:bg-[#181A20] dark:text-zinc-200 dark:hover:border-zinc-700"
+          style={
+            {
+              '--tile-tint': 'var(--tint-violet)',
+              '--tile-angle': '176deg',
+            } as React.CSSProperties
+          }
+          className="settings-grain-tile flex min-h-[50px] w-full items-center justify-between gap-2.5 rounded-2xl px-3.5 py-2 text-xs font-medium text-[var(--relay-text)] active:scale-[0.98]"
         >
-          <span className="flex items-center gap-2.5">
-            <Settings className="h-4 w-4 text-[#1B6EF3] dark:text-blue-400 shrink-0" />
+          <GranularDotMatrix pitch={8.5} />
+          <span className="relative z-10 flex items-center gap-2.5">
+            <Settings className="h-4 w-4 text-[var(--accent-violet)] shrink-0" />
             <span>设置</span>
           </span>
-          <span className="text-[11px] text-zinc-400">头像 · 外观 · 连接</span>
+          <span className="relative z-10 text-[11px] text-[var(--relay-text-muted)]">
+            头像 · 外观 · 连接
+          </span>
         </button>
 
         <PWAInstallButton />
@@ -1428,9 +1496,9 @@ export default function App() {
   );
 
   return (
-    <div className="flex h-dvh flex-col overflow-hidden bg-[#F8F7F4] text-zinc-950 dark:bg-[#0E0F12] dark:text-zinc-100 lg:flex-row">
+    <div className="board-backdrop flex h-dvh flex-col overflow-hidden text-[var(--relay-text)] lg:flex-row">
       {/* Desktop Left Sidebar */}
-      <aside className="hidden lg:flex lg:w-[276px] lg:shrink-0 lg:flex-col border-r border-stone-200/80 bg-[#F3F1EC] dark:border-zinc-800/80 dark:bg-[#121318]">
+      <aside className="hidden lg:flex lg:w-[276px] lg:shrink-0 lg:flex-col border-r border-[var(--relay-tile-border)]/50 bg-[var(--relay-sidebar)]/85 backdrop-blur-xl">
         {renderSidebarContent(false)}
       </aside>
 
@@ -1451,7 +1519,7 @@ export default function App() {
               exit={{ x: '-100%' }}
               transition={{ type: 'spring', stiffness: 380, damping: 36 }}
               onClick={(e) => e.stopPropagation()}
-              className="h-full w-[82vw] max-w-[304px] border-r border-stone-200/80 bg-[#F3F1EC]/95 backdrop-blur-xl shadow-2xl dark:border-zinc-800 dark:bg-[#121318]/95"
+              className="h-full w-[82vw] max-w-[304px] border-r border-[var(--relay-tile-border)] bg-[var(--relay-sidebar)]/95 backdrop-blur-xl shadow-2xl"
             >
               {renderSidebarContent(true)}
             </motion.aside>
@@ -1460,7 +1528,7 @@ export default function App() {
       </AnimatePresence>
 
       {/* Mobile Ultra-Clean Top Header (52px) */}
-      <header className="flex h-[52px] shrink-0 items-center justify-between border-b border-stone-200/80 bg-[#F8F7F4]/95 px-3 backdrop-blur-md dark:border-zinc-800/80 dark:bg-[#0E0F12]/95 lg:hidden">
+      <header className="flex h-[52px] shrink-0 items-center justify-between border-b border-[var(--relay-tile-border)] bg-[var(--relay-bg)]/95 px-3 backdrop-blur-md lg:hidden">
         <div className="flex min-w-0 items-center gap-2">
           <button
             type="button"
@@ -1550,6 +1618,8 @@ export default function App() {
                 onAddItem={handleAddResearch}
                 onUpdateProgress={handleUpdateResearchProgress}
                 onUpdateStatus={handleUpdateResearchStatus}
+                onUpdateItem={handleUpdateResearchItem}
+                onReorderItems={setResearchItems}
                 onDeleteItem={handleDeleteResearch}
                 onAskAgent={handleAskAboutResearch}
                 onShowToast={showToast}
@@ -1574,6 +1644,7 @@ export default function App() {
                 config={config}
                 onAddGoal={handleAddGoal}
                 onToggleMilestone={handleToggleMilestone}
+                onReorderGoals={setGoals}
                 onDeleteGoal={handleDeleteGoal}
                 onDelegateGoal={handleDelegateGoal}
                 onAddReminder={handleAddReminder}
@@ -1621,7 +1692,7 @@ export default function App() {
       {/* Mobile Bottom Tab Bar (Flex-flow so Android insets & keyboard never overlap!) */}
       <nav
         aria-label="主导航"
-        className="shrink-0 grid h-[62px] grid-cols-4 items-center gap-1 border-t border-stone-200/90 bg-[#F8F7F4]/95 px-2 backdrop-blur-md dark:border-zinc-800/90 dark:bg-[#0E0F12]/95 lg:hidden"
+        className="shrink-0 grid h-[62px] grid-cols-4 items-center gap-1 border-t border-[var(--relay-tile-border)] bg-[var(--relay-bg)]/95 px-2 backdrop-blur-md lg:hidden"
       >
         {mobileBottomItems.map(({ key, label, Icon }) => {
           const active = activeTab === key;
@@ -1633,15 +1704,15 @@ export default function App() {
               onClick={() => setActiveTab(key)}
               className={`relative flex h-[48px] flex-col items-center justify-center gap-0.5 rounded-2xl transition-colors ${
                 active
-                  ? 'text-[#1B6EF3] dark:text-blue-400'
-                  : 'text-zinc-500 dark:text-zinc-400'
+                  ? 'text-[var(--accent-indigo)]'
+                  : 'text-[var(--relay-text-muted)]'
               }`}
             >
               {active && (
                 <motion.span
                   layoutId="mobile-tab-pill"
                   transition={{ type: 'spring', stiffness: 420, damping: 32 }}
-                  className="absolute inset-0 rounded-2xl bg-white/95 shadow-xs ring-1 ring-stone-200/70 dark:bg-[#1B1E26] dark:ring-zinc-800"
+                  className="absolute inset-0 rounded-2xl border border-[var(--relay-tile-border)] bg-[var(--relay-tile)] shadow-xs"
                 />
               )}
               <Icon className="relative z-10 h-[19px] w-[19px]" />

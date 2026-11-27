@@ -456,15 +456,15 @@ export const ChatView: React.FC<ChatViewProps> = ({
     : undefined;
 
   return (
-    <div className="relative flex h-full flex-col bg-[#F8F7F4] dark:bg-[#0E0F12]">
+    <div className="relative flex h-full flex-col bg-transparent">
       {/* Quiet Session Header Bar */}
-      <div className="flex items-center justify-between gap-2 border-b border-stone-200/70 bg-[#F8F7F4]/90 px-4 py-1.5 backdrop-blur-md dark:border-zinc-800/70 dark:bg-[#0E0F12]/90 sm:px-6">
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--relay-tile-border)]/60 bg-[var(--relay-bg)]/55 px-4 py-1.5 backdrop-blur-md sm:px-6">
         <button
           type="button"
           onClick={handleOpenSessionPicker}
-          className="flex min-h-[36px] min-w-0 items-center gap-2 rounded-xl px-2 py-1 text-left transition-colors hover:bg-stone-200/60 dark:hover:bg-zinc-800/70"
+          className="flex min-h-[36px] min-w-0 items-center gap-2 rounded-xl px-2 py-1 text-left transition-colors hover:bg-black/5 dark:hover:bg-white/8"
         >
-          <span className="max-w-[200px] truncate text-[13px] font-medium text-zinc-900 dark:text-zinc-100 sm:max-w-[340px]">
+          <span className="max-w-[200px] truncate text-[13px] font-medium text-[var(--relay-text)] sm:max-w-[340px]">
             {safeSession.title}
           </span>
           {activeShortId && (
@@ -584,43 +584,48 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         </div>
                       )}
                       {msg.content && (
-                        <div className="rounded-3xl rounded-br-lg bg-zinc-900 px-4.5 py-3 text-[15px] leading-relaxed text-zinc-50 whitespace-pre-wrap shadow-xs dark:bg-[#1B6EF3] dark:text-white">
+                        <div className="chat-bubble-user rounded-[22px] rounded-br-[8px] px-4.5 py-3 text-[15px] leading-relaxed text-[var(--relay-text)] whitespace-pre-wrap">
                           {msg.content}
                         </div>
                       )}
-                      <div className="pr-1 text-right font-mono-tabular text-[11px] text-zinc-400 dark:text-zinc-500">
+                      <div className="pr-1.5 text-right font-mono-tabular text-[11px] text-[var(--relay-text-faint)]">
                         {msg.timestamp}
                       </div>
                     </div>
                   ) : (
-                    <div className="flex items-start gap-3 sm:gap-3.5">
+                    <div className="flex items-start gap-2.5 sm:gap-3">
                       <img
                         src={avatarSrc}
                         alt={agentProfile.name}
-                        className="mt-0.5 h-7 w-7 shrink-0 rounded-full object-cover ring-1 ring-stone-200/80 dark:ring-zinc-800"
+                        className="mt-1 h-7 w-7 shrink-0 rounded-full object-cover ring-1 ring-white/20"
                       />
-                      <div className="min-w-0 flex-1 space-y-2.5">
-                        <div className="flex items-center justify-between gap-2">
-                          <div className="flex items-center gap-1.5 text-xs text-zinc-400">
-                            <span className="font-semibold text-zinc-900 dark:text-zinc-100">
-                              {agentProfile.name}
-                            </span>
-                            <span aria-hidden="true">·</span>
-                            <span className="font-mono-tabular">{msg.timestamp}</span>
+                      <div className="min-w-0 max-w-[90%] sm:max-w-[84%] space-y-2">
+                        <AgentTraceBlock
+                          thinking={msg.thinking}
+                          toolSteps={msg.toolSteps}
+                          elapsedMs={msg.elapsedMs}
+                          streaming={msg.streaming}
+                        />
+
+                        {msg.content && (
+                          <div className="chat-bubble-assistant rounded-[22px] rounded-tl-[8px] px-4.5 py-3.5 text-[var(--relay-text)]">
+                            <MarkdownMessage content={msg.content} />
                           </div>
+                        )}
+
+                        <div className="flex items-center gap-2 pl-1.5 text-[11px] text-[var(--relay-text-faint)]">
+                          <span className="font-mono-tabular">{msg.timestamp}</span>
                           {msg.content && !msg.streaming && (
                             <button
                               type="button"
                               onClick={() => void handleCopyMessage(msg.id, msg.content)}
                               aria-label="复制回复内容"
-                              className="inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] text-zinc-400 opacity-75 transition-all hover:bg-stone-200/70 hover:text-zinc-800 sm:opacity-0 sm:group-hover:opacity-100 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                              className="inline-flex h-6 items-center gap-1 rounded-lg px-1.5 text-[11px] text-[var(--relay-text-faint)] opacity-75 transition-all hover:bg-white/10 hover:text-[var(--relay-text)] sm:opacity-0 sm:group-hover:opacity-100"
                             >
                               {copiedMsgId === msg.id ? (
                                 <>
-                                  <Check className="h-3 w-3 text-emerald-600 dark:text-emerald-400" />
-                                  <span className="text-emerald-600 dark:text-emerald-400">
-                                    已复制
-                                  </span>
+                                  <Check className="h-3 w-3 text-[var(--accent-mint)]" />
+                                  <span className="text-[var(--accent-mint)]">已复制</span>
                                 </>
                               ) : (
                                 <>
@@ -631,15 +636,6 @@ export const ChatView: React.FC<ChatViewProps> = ({
                             </button>
                           )}
                         </div>
-
-                        <AgentTraceBlock
-                          thinking={msg.thinking}
-                          toolSteps={msg.toolSteps}
-                          elapsedMs={msg.elapsedMs}
-                          streaming={msg.streaming}
-                        />
-
-                        {msg.content && <MarkdownMessage content={msg.content} />}
 
                         {msg.cards && msg.cards.length > 0 && (
                           <div className="space-y-3 pt-1">
@@ -672,8 +668,8 @@ export const ChatView: React.FC<ChatViewProps> = ({
         </div>
       </div>
 
-      {/* Muse Floating Glass Composer Dock */}
-      <div className="bg-gradient-to-t from-[#F8F7F4] via-[#F8F7F4]/95 to-transparent px-3 pt-2 pb-3 dark:from-[#0E0F12] dark:via-[#0E0F12]/95 sm:px-6 sm:pb-5">
+      {/* Translucent Glass Composer Dock */}
+      <div className="bg-gradient-to-t from-[var(--relay-bg)] via-[var(--relay-bg)]/75 to-transparent px-3 pt-2 pb-3 sm:px-6 sm:pb-5">
         <div className="relative mx-auto max-w-[740px]">
           {/* Slash Command Picker */}
           {matchingCommands.length > 0 && (
@@ -819,10 +815,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
             )}
           </AnimatePresence>
 
-          {/* Floating Glass Capsule Form */}
+          {/* Floating Translucent Glass Capsule Form */}
           <form
             onSubmit={handleSubmit}
-            className="mac-card flex items-end gap-1 rounded-3xl border border-stone-200/90 p-1.5 transition-colors focus-within:border-[#1B6EF3]/70 dark:border-zinc-800 dark:focus-within:border-blue-500/70"
+            className="chat-composer-glass flex items-end gap-1 rounded-[26px] p-1.5 transition-colors focus-within:border-white/30"
           >
             <input
               ref={fileInputRef}

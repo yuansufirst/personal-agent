@@ -5,6 +5,70 @@
   :root {
     --font-sans: 'Plus Jakarta Sans', 'Noto Sans SC', -apple-system, BlinkMacSystemFont, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
+
+    /* Tunable iOS Dark Frosted Bottom-Glow Defaults (overridden live by ThemeTuner) */
+    --relay-dark-bg: #0D1017;
+    --relay-dark-sidebar: #090C12;
+    --relay-dark-tile: #151A25;
+    --relay-dark-tile-hover: #1C2332;
+    --relay-dark-tile-border: rgba(255, 255, 255, 0.12);
+    --relay-dark-rim-bottom: rgba(255, 255, 255, 0.42);
+    --relay-dark-glow: rgba(255, 255, 255, 0.24);
+    --relay-grad-pct: 28%;
+    --relay-dark-text: #E4E9F2;
+    --relay-dark-text-muted: #9AA4B8;
+    --relay-dark-text-faint: #677288;
+
+    /* Soft Paper Light Mode (low-glare fallback) */
+    --relay-bg: #F2F0EB;
+    --relay-sidebar: #EAE7E0;
+    --relay-tile: #FAF9F6;
+    --relay-tile-hover: #FFFFFF;
+    --relay-tile-border: rgba(24, 24, 27, 0.1);
+    --relay-rim-bottom: rgba(255, 255, 255, 0.9);
+    --relay-glow: rgba(15, 23, 42, 0.06);
+    --relay-text: #22252D;
+    --relay-text-muted: #666E7E;
+    --relay-text-faint: #959CAB;
+    --relay-track: rgba(24, 24, 27, 0.08);
+
+    /* Luminous Accents */
+    --accent-indigo: #7B9BFF;
+    --accent-mint: #53DFAF;
+    --accent-sky: #56C6F8;
+    --accent-amber: #F5BA55;
+    --accent-coral: #F76C82;
+    --accent-violet: #B695FF;
+
+    /* High-Contrast Saturated Gradient Tints (varied across tiles) */
+    --tint-blue: #2563EB;
+    --tint-red: #E11D48;
+    --tint-emerald: #059669;
+    --tint-amber: #D97706;
+    --tint-violet: #7C3AED;
+    --tint-cyan: #0284C7;
+    --tint-teal: #0D9488;
+    --tint-rose: #DB2777;
+
+    /* Board & Magnetic Tile Geometry */
+    --relay-radius: 22px;
+    --relay-gap: 12px;
+    --relay-tile-pad: 15px;
+    --relay-tile-min-h: 148px;
+  }
+
+  .dark {
+    --relay-bg: var(--relay-dark-bg);
+    --relay-sidebar: var(--relay-dark-sidebar);
+    --relay-tile: var(--relay-dark-tile);
+    --relay-tile-hover: var(--relay-dark-tile-hover);
+    --relay-tile-border: var(--relay-dark-tile-border);
+    --relay-rim-bottom: var(--relay-dark-rim-bottom);
+    --relay-glow: var(--relay-dark-glow);
+    --relay-text: var(--relay-dark-text);
+    --relay-text-muted: var(--relay-dark-text-muted);
+    --relay-text-faint: var(--relay-dark-text-faint);
+    --relay-track: rgba(255, 255, 255, 0.1);
   }
 
   html {
@@ -15,14 +79,12 @@
   }
 
   body {
-    background-color: #F8F7F4;
-    color: #18181B;
+    background-color: var(--relay-bg);
+    color: var(--relay-text);
     overscroll-behavior-y: none;
   }
 
   .dark body {
-    background-color: #0E0F12;
-    color: #F4F4F5;
     letter-spacing: 0.01em;
   }
 }
@@ -40,25 +102,414 @@
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
 
-/* macOS-inspired frosted translucent card surface with subtle inner specular highlight */
-.mac-card {
-  background: rgba(255, 255, 255, 0.84);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
-  box-shadow:
-    0 1px 2px rgba(15, 23, 42, 0.04),
-    0 8px 24px -6px rgba(15, 23, 42, 0.05),
-    inset 0 1px 0 rgba(255, 255, 255, 0.85);
+/* Subtle ambient board backdrop so frosted tiles and glass bubbles gently refract depth */
+.board-backdrop {
+  background-color: var(--relay-bg);
 }
 
-.dark .mac-card {
-  background: rgba(23, 25, 31, 0.82);
+.dark .board-backdrop {
+  background-color: var(--relay-bg);
+  background-image:
+    radial-gradient(58% 42% at 16% 10%, color-mix(in srgb, var(--tint-blue) 10%, transparent), transparent 72%),
+    radial-gradient(48% 38% at 86% 20%, color-mix(in srgb, var(--tint-violet) 8%, transparent), transparent 74%),
+    radial-gradient(52% 44% at 68% 88%, color-mix(in srgb, var(--tint-teal) 7%, transparent), transparent 76%);
+}
+
+/* iOS-Inspired Frosted Glass Magnetic Tile:
+   - Clean quiet border all around (NO bright edge rim glow)
+   - High dark ratio (~56% deep obsidian) -> compact vibrant color pool toward bottom
+   - Downward-shining under-mounted lamp glow projected below the tile via ::after */
+.board-tile {
+  --tile-tint: var(--tint-blue);
+  --tile-angle: 174deg;
+  position: relative;
+  border-radius: var(--relay-radius);
+  padding: var(--relay-tile-pad);
+  min-height: var(--relay-tile-min-h);
+  border: 1px solid var(--relay-tile-border);
+  background:
+    linear-gradient(
+      var(--tile-angle),
+      color-mix(in srgb, var(--relay-tile) 96%, transparent) 0%,
+      color-mix(in srgb, var(--relay-tile) 95%, transparent) 58%,
+      color-mix(in srgb, var(--tile-tint) 11%, var(--relay-tile)) 100%
+    );
+  backdrop-filter: blur(22px) saturate(160%);
+  -webkit-backdrop-filter: blur(22px) saturate(160%);
+  box-shadow: 0 6px 18px -8px rgba(15, 23, 42, 0.08);
+  transition: border-color 180ms ease, box-shadow 180ms ease, background 200ms ease;
+}
+
+.dark .board-tile {
+  border-color: rgba(255, 255, 255, 0.085);
+  background:
+    linear-gradient(
+      var(--tile-angle),
+      color-mix(in srgb, var(--relay-tile) 93%, #020306) 0%,
+      color-mix(in srgb, var(--relay-tile) 91%, #020306) 56%,
+      color-mix(in srgb, var(--tile-tint) var(--relay-grad-pct), color-mix(in srgb, var(--relay-tile) 82%, #020306)) 100%
+    );
+  box-shadow: 0 12px 26px -12px rgba(0, 0, 0, 0.88);
+}
+
+.dark .board-tile::after {
+  content: '';
+  position: absolute;
+  left: 12%;
+  right: 12%;
+  top: calc(100% - 2px);
+  height: 22px;
+  border-radius: 0 0 999px 999px;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      76% 100% at 50% 0%,
+      rgba(255, 255, 255, 0.44) 0%,
+      color-mix(in srgb, var(--tile-tint) 52%, rgba(255, 255, 255, 0.14)) 44%,
+      transparent 100%
+    );
+  filter: blur(9px);
+  opacity: 0.85;
+  transition: opacity 180ms ease, transform 180ms ease;
+}
+
+.dark .board-tile:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.dark .board-tile:hover::after {
+  opacity: 1;
+  transform: scaleX(1.04);
+}
+
+/* Priority / Starred Full-Width Tile: wider, stronger downward under-lamp throw */
+.dark .board-tile-priority {
+  border-color: rgba(255, 255, 255, 0.1);
+  background:
+    linear-gradient(
+      var(--tile-angle),
+      color-mix(in srgb, var(--relay-tile) 92%, #020306) 0%,
+      color-mix(in srgb, var(--relay-tile) 89%, #020306) 52%,
+      color-mix(in srgb, var(--tile-tint) calc(var(--relay-grad-pct) * 1.18), color-mix(in srgb, var(--relay-tile) 80%, #020306)) 100%
+    );
+}
+
+.dark .board-tile-priority::after {
+  left: 8%;
+  right: 8%;
+  height: 26px;
+  background:
+    radial-gradient(
+      82% 100% at 50% 0%,
+      rgba(255, 255, 255, 0.58) 0%,
+      color-mix(in srgb, var(--tile-tint) 68%, rgba(255, 255, 255, 0.18)) 48%,
+      transparent 100%
+    );
+  filter: blur(10px);
+  opacity: 0.96;
+}
+
+/* Compact Frosted Tile with Downward Under-Lamp Glow */
+.mini-tile {
+  --tile-tint: var(--tint-blue);
+  --tile-angle: 175deg;
+  position: relative;
+  border: 1px solid var(--relay-tile-border);
+  background:
+    linear-gradient(
+      var(--tile-angle),
+      color-mix(in srgb, var(--relay-tile) 96%, transparent) 0%,
+      color-mix(in srgb, var(--relay-tile) 95%, transparent) 60%,
+      color-mix(in srgb, var(--tile-tint) 9%, var(--relay-tile)) 100%
+    );
+  backdrop-filter: blur(18px) saturate(155%);
+  -webkit-backdrop-filter: blur(18px) saturate(155%);
+  box-shadow: 0 3px 10px -4px rgba(15, 23, 42, 0.06);
+  transition: border-color 160ms ease, box-shadow 160ms ease, background 180ms ease, transform 140ms ease;
+}
+
+.dark .mini-tile {
+  border-color: rgba(255, 255, 255, 0.085);
+  background:
+    linear-gradient(
+      var(--tile-angle),
+      color-mix(in srgb, var(--relay-tile) 93%, #020306) 0%,
+      color-mix(in srgb, var(--relay-tile) 90%, #020306) 58%,
+      color-mix(in srgb, var(--tile-tint) calc(var(--relay-grad-pct) * 0.85), color-mix(in srgb, var(--relay-tile) 82%, #020306)) 100%
+    );
+  box-shadow: 0 8px 18px -10px rgba(0, 0, 0, 0.82);
+}
+
+.dark .mini-tile::after {
+  content: '';
+  position: absolute;
+  left: 16%;
+  right: 16%;
+  top: calc(100% - 1px);
+  height: 14px;
+  border-radius: 0 0 999px 999px;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      75% 100% at 50% 0%,
+      rgba(255, 255, 255, 0.36) 0%,
+      color-mix(in srgb, var(--tile-tint) 48%, rgba(255, 255, 255, 0.1)) 46%,
+      transparent 100%
+    );
+  filter: blur(7px);
+  opacity: 0.7;
+  transition: opacity 160ms ease;
+}
+
+.dark .mini-tile:hover {
+  border-color: rgba(255, 255, 255, 0.14);
+}
+
+.dark .mini-tile:hover::after {
+  opacity: 0.92;
+}
+
+.dark .mini-tile-active {
+  border-color: rgba(255, 255, 255, 0.16);
+  background:
+    linear-gradient(
+      var(--tile-angle),
+      color-mix(in srgb, var(--relay-tile) 91%, #030508) 0%,
+      color-mix(in srgb, var(--relay-tile) 86%, #030508) 50%,
+      color-mix(in srgb, var(--tile-tint) calc(var(--relay-grad-pct) * 1.25), var(--relay-tile)) 100%
+    );
+}
+
+.dark .mini-tile-active::after {
+  left: 10%;
+  right: 10%;
+  height: 18px;
+  background:
+    radial-gradient(
+      80% 100% at 50% 0%,
+      rgba(255, 255, 255, 0.54) 0%,
+      color-mix(in srgb, var(--tile-tint) 66%, rgba(255, 255, 255, 0.16)) 48%,
+      transparent 100%
+    );
+  filter: blur(8px);
+  opacity: 0.98;
+}
+
+/* Sidebar & Settings Magnetic Tile:
+   Solid dark upper body (44%), black-square dithered transition seam (44%-86%),
+   pure vibrant bottom strip (86%-100%) + downward under-lamp glow via ::after */
+.settings-grain-tile {
+  --tile-tint: var(--tint-blue);
+  --tile-angle: 176deg;
+  position: relative;
+  border: 1px solid var(--relay-tile-border);
+  background:
+    linear-gradient(
+      var(--tile-angle),
+      color-mix(in srgb, var(--relay-tile) 96%, #ECEAE4) 0%,
+      color-mix(in srgb, var(--relay-tile) 95%, #ECEAE4) 46%,
+      color-mix(in srgb, var(--tile-tint) 16%, var(--relay-tile)) 88%,
+      color-mix(in srgb, var(--tile-tint) 22%, var(--relay-tile)) 100%
+    );
+  backdrop-filter: blur(20px) saturate(155%);
+  -webkit-backdrop-filter: blur(20px) saturate(155%);
+  box-shadow: 0 3px 12px -4px rgba(15, 23, 42, 0.06);
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 140ms ease;
+}
+
+.dark .settings-grain-tile {
+  border-color: rgba(255, 255, 255, 0.085);
+  background:
+    linear-gradient(
+      var(--tile-angle),
+      color-mix(in srgb, var(--relay-tile) 93%, #030408) 0%,
+      color-mix(in srgb, var(--relay-tile) 91%, #030408) 44%,
+      color-mix(in srgb, var(--tile-tint) calc(var(--relay-grad-pct) * 0.95), color-mix(in srgb, var(--relay-tile) 65%, #161C28)) 84%,
+      color-mix(in srgb, var(--tile-tint) calc(var(--relay-grad-pct) * 1.45), color-mix(in srgb, var(--relay-tile) 70%, #090C12)) 100%
+    );
+  box-shadow: 0 10px 22px -11px rgba(0, 0, 0, 0.86);
+}
+
+.dark .settings-grain-tile::after {
+  content: '';
+  position: absolute;
+  left: 14%;
+  right: 14%;
+  top: calc(100% - 1px);
+  height: 15px;
+  border-radius: 0 0 999px 999px;
+  pointer-events: none;
+  background:
+    radial-gradient(
+      76% 100% at 50% 0%,
+      rgba(255, 255, 255, 0.38) 0%,
+      color-mix(in srgb, var(--tile-tint) 54%, rgba(255, 255, 255, 0.12)) 46%,
+      transparent 100%
+    );
+  filter: blur(7px);
+  opacity: 0.74;
+  transition: opacity 160ms ease;
+}
+
+.dark .settings-grain-tile:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+}
+
+.dark .settings-grain-tile:hover::after {
+  opacity: 0.95;
+}
+
+.dark .settings-grain-tile.mini-tile-active {
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.dark .settings-grain-tile.mini-tile-active::after {
+  left: 10%;
+  right: 10%;
+  height: 18px;
+  background:
+    radial-gradient(
+      80% 100% at 50% 0%,
+      rgba(255, 255, 255, 0.56) 0%,
+      color-mix(in srgb, var(--tile-tint) 68%, rgba(255, 255, 255, 0.18)) 48%,
+      transparent 100%
+    );
+  filter: blur(8px);
+  opacity: 0.98;
+}
+
+/* Main Chat Translucent Tinted Glass Dialog Bubbles (restrained glass texture, subtle color, no heavy chrome) */
+.chat-bubble-user {
+  border: 1px solid rgba(37, 99, 235, 0.22);
+  background: rgba(37, 99, 235, 0.11);
   backdrop-filter: blur(20px) saturate(150%);
   -webkit-backdrop-filter: blur(20px) saturate(150%);
   box-shadow:
-    0 1px 2px rgba(0, 0, 0, 0.3),
-    0 10px 28px -8px rgba(0, 0, 0, 0.45),
-    inset 0 1px 0 rgba(255, 255, 255, 0.06);
+    0 6px 20px -10px rgba(37, 99, 235, 0.2),
+    inset 0 1px 0 rgba(255, 255, 255, 0.65);
+}
+
+.dark .chat-bubble-user {
+  border: 1px solid color-mix(in srgb, var(--tint-blue) 34%, rgba(255, 255, 255, 0.16));
+  background: linear-gradient(
+    150deg,
+    color-mix(in srgb, var(--tint-blue) 22%, rgba(22, 28, 42, 0.48)) 0%,
+    color-mix(in srgb, var(--tint-cyan) 14%, rgba(16, 20, 32, 0.44)) 100%
+  );
+  backdrop-filter: blur(22px) saturate(155%);
+  -webkit-backdrop-filter: blur(22px) saturate(155%);
+  box-shadow:
+    0 10px 26px -14px rgba(0, 0, 0, 0.7),
+    inset 0 1px 0 rgba(255, 255, 255, 0.18),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.06);
+}
+
+.chat-bubble-assistant {
+  border: 1px solid rgba(24, 24, 27, 0.08);
+  background: rgba(255, 255, 255, 0.68);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  box-shadow:
+    0 6px 20px -12px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.dark .chat-bubble-assistant {
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  background: linear-gradient(
+    155deg,
+    color-mix(in srgb, var(--tint-violet) 9%, rgba(26, 31, 44, 0.42)) 0%,
+    color-mix(in srgb, var(--tint-teal) 8%, rgba(16, 20, 30, 0.36)) 100%
+  );
+  backdrop-filter: blur(20px) saturate(150%);
+  -webkit-backdrop-filter: blur(20px) saturate(150%);
+  box-shadow:
+    0 10px 26px -14px rgba(0, 0, 0, 0.65),
+    inset 0 1px 0 rgba(255, 255, 255, 0.12),
+    inset 0 -1px 0 rgba(255, 255, 255, 0.05);
+}
+
+.chat-composer-glass {
+  border: 1px solid rgba(24, 24, 27, 0.1);
+  background: rgba(255, 255, 255, 0.72);
+  backdrop-filter: blur(22px) saturate(150%);
+  -webkit-backdrop-filter: blur(22px) saturate(150%);
+  box-shadow:
+    0 8px 24px -10px rgba(15, 23, 42, 0.08),
+    inset 0 1px 0 rgba(255, 255, 255, 0.85);
+}
+
+.dark .chat-composer-glass {
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  background: linear-gradient(
+    160deg,
+    color-mix(in srgb, var(--tint-blue) 10%, rgba(20, 25, 36, 0.54)) 0%,
+    rgba(13, 16, 24, 0.52) 100%
+  );
+  backdrop-filter: blur(24px) saturate(155%);
+  -webkit-backdrop-filter: blur(24px) saturate(155%);
+  box-shadow:
+    0 12px 28px -12px rgba(0, 0, 0, 0.75),
+    inset 0 1px 0 rgba(255, 255, 255, 0.14);
+}
+
+/* Modal & Sheet Frosted Glass Surface */
+.mac-card {
+  background: rgba(250, 249, 246, 0.92);
+  backdrop-filter: blur(22px) saturate(155%);
+  -webkit-backdrop-filter: blur(22px) saturate(155%);
+  border: 1px solid var(--relay-tile-border);
+  box-shadow:
+    0 4px 16px -4px rgba(15, 23, 42, 0.07),
+    inset 0 -1px 0 var(--relay-rim-bottom);
+}
+
+.dark .mac-card {
+  background:
+    linear-gradient(
+      176deg,
+      color-mix(in srgb, var(--relay-tile) 94%, #030508) 0%,
+      color-mix(in srgb, var(--relay-tile) 92%, #030508) 66%,
+      color-mix(in srgb, var(--tint-blue) 16%, var(--relay-tile)) 100%
+    );
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  backdrop-filter: blur(24px) saturate(160%);
+  -webkit-backdrop-filter: blur(24px) saturate(160%);
+  box-shadow:
+    0 16px 34px -12px rgba(0, 0, 0, 0.8),
+    0 14px 28px -12px var(--relay-glow);
+}
+
+/* Tactile Low-Glare Range Slider */
+.relay-slider {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 5px;
+  border-radius: 9999px;
+  background: var(--relay-track);
+  outline: none;
+}
+
+.relay-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: var(--accent-indigo);
+  border: 2px solid var(--relay-tile);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
+}
+
+.relay-slider::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border-radius: 9999px;
+  background: var(--accent-indigo);
+  border: 2px solid var(--relay-tile);
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.45);
+  cursor: pointer;
 }
 
 /* Subtle editorial scrollbars */
@@ -77,5 +528,12 @@
 }
 
 .dark ::-webkit-scrollbar-thumb {
-  background: rgba(161, 161, 170, 0.2);
+  background: rgba(255, 255, 255, 0.16);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
 }
