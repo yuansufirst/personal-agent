@@ -39,6 +39,10 @@ import java.util.ArrayList;
     }
 )
 public class NativeSpeechPlugin extends Plugin {
+    private SpeechRecognizer recognizer;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private boolean isListening = false;
+
     private static final int MAX_RECORD_SECONDS = 60;
 
     private MediaRecorder mediaRecorder;
