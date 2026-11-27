@@ -37,6 +37,8 @@ import type {
   ChatAttachment,
   ChatMessage,
   ConnectionConfig,
+  DeviceActionItem,
+  DeviceContextConfig,
   GoalItem,
   HealthConfig,
   HealthDailyLog,
@@ -65,6 +67,11 @@ import { SettingsModal } from './components/SettingsModal';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAComponents';
 import { registerAndroidBackHandler, syncNativeStatusBar } from './services/nativeApp';
 import { DEFAULT_AGENT_PROFILE, resolveAvatarSrc } from './services/avatarPresets';
+import {
+  buildAutoContextHeader,
+  DEFAULT_DEVICE_CONTEXT_CONFIG,
+  executeDeviceAction,
+} from './services/deviceBridge';
 
 const STORAGE_KEYS = {
   config: 'relay_connection_config_v2',
@@ -77,6 +84,7 @@ const STORAGE_KEYS = {
   research: 'relay_research_v1',
   healthConfig: 'relay_health_config_v1',
   healthLog: 'relay_health_log_v1',
+  deviceContext: 'relay_device_context_v1',
   nodes: 'relay_mesh_nodes_v2',
   theme: 'relay_theme_v1',
 };
@@ -243,6 +251,11 @@ export default function App() {
     return initialCfg.mode === 'sandbox' ? INITIAL_FILES : [];
   });
 
+  const [deviceContextConfig, setDeviceContextConfig] = useState<DeviceContextConfig>(() =>
+    loadFromStorage(STORAGE_KEYS.deviceContext, DEFAULT_DEVICE_CONTEXT_CONFIG)
+  );
+  const [spaceSubTab, setSpaceSubTab] = useState<'device' | 'environment' | 'library'>('device');
+
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectionOpen, setConnectionOpen] = useState(false);
@@ -371,6 +384,10 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.nodes, JSON.stringify(nodes));
   }, [nodes]);
+
+  useEffect(() => {
+    localStorage.setItem(STORAGE_KEYS.deviceContext, JSON.stringify(deviceContextConfig));
+  }, [deviceContextConfig]);
 
   const showToast = useCallback((msg: string) => {
     setToast(msg);
@@ -626,8 +643,16 @@ export default function App() {
         : config;
 
     try {
+      let promptToSend = text;
+      if (config.mode !== 'sandbox') {
+        const autoHeader = await buildAutoContextHeader(deviceContextConfig);
+        if (autoHeader) {
+          promptToSend = `${autoHeader}${text}`;
+        }
+      }
+
       await streamAgentReply(
-        text,
+        promptToSend,
         nextHistory,
         effectiveConfig,
         (chunk) => {
@@ -974,6 +999,59 @@ export default function App() {
         `已批准执行：${action.data.targetDevice} · ${action.data.commandPreview}。请在云端确认并执行，完成后把结果告诉我。`
       );
     }
+  };
+
+  // Native Android device-action card executor (Today-style Agent -> Phone closed loop)
+  const handleExecuteDeviceAction = async (action: DeviceActionItem) => {
+    try {
+      const res = await executeDeviceAction(action);
+      updateSessionMessages(activeSession.id, (prev) =>
+        prev.map((m) => ({
+          ...m,
+          cards: m.cards?.map((c) =>
+            c.type === 'device-action' && c.data.id === action.id
+              ? {
+                  ...c,
+                  data: {
+                    ...c.data,
+                    status: 'executed',
+                    resultText: res.resultText,
+                  },
+                }
+              : c
+          ),
+        }))
+      );
+      showToast(res.resultText);
+      if (res.replyToAgent) {
+        void handleSendMessage(res.replyToAgent);
+      }
+    } catch (err) {
+      const reason = err instanceof Error ? err.message : '手机动作执行失败';
+      updateSessionMessages(activeSession.id, (prev) =>
+        prev.map((m) => ({
+          ...m,
+          cards: m.cards?.map((c) =>
+            c.type === 'device-action' && c.data.id === action.id
+              ? {
+                  ...c,
+                  data: {
+                    ...c.data,
+                    status: 'failed',
+                    resultText: reason,
+                  },
+                }
+              : c
+          ),
+        }))
+      );
+      showToast(reason);
+    }
+  };
+
+  const handleOpenDeviceHub = () => {
+    setSpaceSubTab('device');
+    setActiveTab('space');
   };
 
   // Space / Environment handlers
@@ -1453,8 +1531,11 @@ export default function App() {
                   onSnoozeReminder={(item) => handleSnoozeReminderById(item.id)}
                   onSyncReminder={handleSyncReminderFromCard}
                   onResolveApproval={handleResolveApproval}
+                  onExecuteDeviceAction={(act) => void handleExecuteDeviceAction(act)}
+                  onOpenDeviceHub={handleOpenDeviceHub}
                   onPreviewFile={(file) => {
                     setPreviewFile(file);
+                    setSpaceSubTab('library');
                     setActiveTab('space');
                   }}
                   onAskAboutFile={handleAskAboutFile}
@@ -1506,6 +1587,8 @@ export default function App() {
             {activeTab === 'space' && (
               <SpaceView
                 config={config}
+                initialSubTab={spaceSubTab}
+                deviceContextConfig={deviceContextConfig}
                 nodes={nodes}
                 macros={QUICK_MACROS}
                 files={files}
@@ -1513,6 +1596,11 @@ export default function App() {
                 selectedBriefing={selectedBriefing}
                 previewFile={previewFile}
                 isFetchingDigest={isFetchingDigest}
+                onUpdateDeviceContextConfig={setDeviceContextConfig}
+                onSendContextToAgent={(promptText) => {
+                  setActiveTab('chat');
+                  void handleSendMessage(promptText);
+                }}
                 onOpenConnection={() => setConnectionOpen(true)}
                 onUpdateNodeIp={handleUpdateNodeIp}
                 onRunMacro={handleRunMacro}
@@ -1523,6 +1611,7 @@ export default function App() {
                 onToggleSaveBriefing={handleToggleSaveBriefing}
                 onSelectBriefing={setSelectedBriefing}
                 onAskAboutBriefing={handleAskAboutBriefing}
+                onShowToast={showToast}
               />
             )}
           </motion.div>
@@ -1574,6 +1663,7 @@ export default function App() {
         onUpdateProfile={setAgentProfile}
         onToggleDarkMode={setDarkMode}
         onOpenConnection={() => setConnectionOpen(true)}
+        onOpenDeviceHub={handleOpenDeviceHub}
         onShowToast={showToast}
       />
 

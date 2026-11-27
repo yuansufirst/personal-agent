@@ -17,13 +17,17 @@ import {
 import type {
   BriefingItem,
   ConnectionConfig,
+  DeviceContextConfig,
   MeshFileItem,
   MeshNode,
   QuickMacro,
 } from '../types/relay';
+import { DeviceHubView } from './DeviceHubView';
 
 interface SpaceViewProps {
   config: ConnectionConfig;
+  initialSubTab?: 'device' | 'environment' | 'library';
+  deviceContextConfig: DeviceContextConfig;
   nodes: MeshNode[];
   macros: QuickMacro[];
   files: MeshFileItem[];
@@ -31,6 +35,8 @@ interface SpaceViewProps {
   selectedBriefing: BriefingItem | null;
   previewFile: MeshFileItem | null;
   isFetchingDigest: boolean;
+  onUpdateDeviceContextConfig: (next: DeviceContextConfig) => void;
+  onSendContextToAgent: (promptText: string) => void;
   onOpenConnection: () => void;
   onUpdateNodeIp: (nodeId: string, ip: string) => void;
   onRunMacro: (macro: QuickMacro) => void;
@@ -41,12 +47,15 @@ interface SpaceViewProps {
   onToggleSaveBriefing: (item: BriefingItem) => void;
   onSelectBriefing: (item: BriefingItem | null) => void;
   onAskAboutBriefing: (item: BriefingItem) => void;
+  onShowToast: (msg: string) => void;
 }
 
-type SpaceTab = 'environment' | 'library';
+type SpaceTab = 'device' | 'environment' | 'library';
 
 export const SpaceView: React.FC<SpaceViewProps> = ({
   config,
+  initialSubTab = 'device',
+  deviceContextConfig,
   nodes,
   macros,
   files,
@@ -54,6 +63,8 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
   selectedBriefing,
   previewFile,
   isFetchingDigest,
+  onUpdateDeviceContextConfig,
+  onSendContextToAgent,
   onOpenConnection,
   onUpdateNodeIp,
   onRunMacro,
@@ -64,8 +75,12 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
   onToggleSaveBriefing,
   onSelectBriefing,
   onAskAboutBriefing,
+  onShowToast,
 }) => {
-  const [subTab, setSubTab] = useState<SpaceTab>('environment');
+  const [subTab, setSubTab] = useState<SpaceTab>(initialSubTab);
+  React.useEffect(() => {
+    setSubTab(initialSubTab);
+  }, [initialSubTab]);
   const [editingNodeId, setEditingNodeId] = useState<string | null>(null);
   const [ipDraft, setIpDraft] = useState('');
   const uploadRef = useRef<HTMLInputElement | null>(null);
@@ -97,8 +112,19 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
         <div className="inline-flex rounded-2xl bg-stone-200/70 p-1 dark:bg-zinc-900">
           <button
             type="button"
+            onClick={() => setSubTab('device')}
+            className={`min-h-[38px] rounded-xl px-3.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap ${
+              subTab === 'device'
+                ? 'bg-white text-zinc-950 shadow-xs dark:bg-[#1A1D24] dark:text-zinc-50'
+                : 'text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100'
+            }`}
+          >
+            手机接入
+          </button>
+          <button
+            type="button"
             onClick={() => setSubTab('environment')}
-            className={`min-h-[38px] rounded-xl px-4 py-1.5 text-xs font-medium transition-colors whitespace-nowrap ${
+            className={`min-h-[38px] rounded-xl px-3.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap ${
               subTab === 'environment'
                 ? 'bg-white text-zinc-950 shadow-xs dark:bg-[#1A1D24] dark:text-zinc-50'
                 : 'text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100'
@@ -109,7 +135,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
           <button
             type="button"
             onClick={() => setSubTab('library')}
-            className={`min-h-[38px] rounded-xl px-4 py-1.5 text-xs font-medium transition-colors whitespace-nowrap ${
+            className={`min-h-[38px] rounded-xl px-3.5 py-1.5 text-xs font-medium transition-colors whitespace-nowrap ${
               subTab === 'library'
                 ? 'bg-white text-zinc-950 shadow-xs dark:bg-[#1A1D24] dark:text-zinc-50'
                 : 'text-zinc-600 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100'
@@ -120,7 +146,14 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
         </div>
       </div>
 
-      {subTab === 'environment' ? (
+      {subTab === 'device' ? (
+        <DeviceHubView
+          contextConfig={deviceContextConfig}
+          onUpdateContextConfig={onUpdateDeviceContextConfig}
+          onSendContextToAgent={onSendContextToAgent}
+          onShowToast={onShowToast}
+        />
+      ) : subTab === 'environment' ? (
         <div className="space-y-6">
           {/* Active Agent Endpoint Card */}
           <div className="mac-card flex flex-col gap-3 rounded-3xl p-5 sm:flex-row sm:items-center sm:justify-between">

@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Link2,
   Moon,
+  Smartphone,
   Sun,
   X,
 } from 'lucide-react';
@@ -21,6 +22,7 @@ interface SettingsModalProps {
   onUpdateProfile: (next: AgentProfile) => void;
   onToggleDarkMode: (dark: boolean) => void;
   onOpenConnection: () => void;
+  onOpenDeviceHub: () => void;
   onShowToast: (msg: string) => void;
 }
 
@@ -62,6 +64,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   onUpdateProfile,
   onToggleDarkMode,
   onOpenConnection,
+  onOpenDeviceHub,
   onShowToast,
 }) => {
   const [nameDraft, setNameDraft] = useState(profile.name);
@@ -293,6 +296,30 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       </div>
                       <div className="mt-0.5 truncate font-mono-tabular text-[11px] text-zinc-400">
                         {config.serverUrl || '点击配置服务器地址与会话参数'}
+                      </div>
+                    </div>
+                  </div>
+                  <ChevronRight className="h-4 w-4 shrink-0 text-zinc-400" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose();
+                    onOpenDeviceHub();
+                  }}
+                  className="flex min-h-[54px] w-full items-center justify-between gap-3 rounded-2xl border border-stone-200/90 bg-white/80 px-4 py-3 text-left transition-colors hover:border-[#1B6EF3]/60 dark:border-zinc-800 dark:bg-[#181A20] dark:hover:border-blue-500/60"
+                >
+                  <div className="flex min-w-0 items-center gap-3">
+                    <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-emerald-50 text-emerald-600 dark:bg-emerald-950/50 dark:text-emerald-400">
+                      <Smartphone className="h-4 w-4" />
+                    </div>
+                    <div className="min-w-0">
+                      <div className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                        手机系统能力与权限接入
+                      </div>
+                      <div className="mt-0.5 truncate text-[11px] text-zinc-400">
+                        剪贴板 · 日历 · 闹钟 · 通知监听 · 短信 · 定位 · 文件
                       </div>
                     </div>
                   </div>

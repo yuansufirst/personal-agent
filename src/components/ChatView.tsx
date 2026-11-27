@@ -2,18 +2,25 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   ArrowUp,
+  Bell,
+  Calendar,
   Check,
   ChevronDown,
+  Clipboard,
+  Clock,
   Copy,
   FileText,
   Image as ImageIcon,
   Loader2,
+  MapPin,
+  MessageSquareText,
   Mic,
   MicOff,
   Paperclip,
   Plus,
   RefreshCw,
   Search,
+  Smartphone,
   Square,
   Trash2,
   X,
@@ -24,6 +31,8 @@ import type {
   ChatAttachment,
   ChatMessage,
   ConnectionConfig,
+  DeviceActionItem,
+  DeviceCapabilityKey,
   MeshFileItem,
   ReminderItem,
   SessionRecord,
@@ -34,6 +43,7 @@ import { MarkdownMessage } from './MarkdownMessage';
 import { AgentTraceBlock } from './AgentTraceBlock';
 import { resolveAvatarSrc } from '../services/avatarPresets';
 import { startVoiceRecognition, type SpeechSessionHandle } from '../services/nativeSpeech';
+import { captureCapabilityContext } from '../services/deviceBridge';
 
 interface ChatViewProps {
   messages: ChatMessage[];
@@ -59,6 +69,8 @@ interface ChatViewProps {
   onSnoozeReminder: (item: ReminderItem) => void;
   onSyncReminder: (item: ReminderItem) => void;
   onResolveApproval: (actionId: string, decision: 'approved' | 'rejected') => void;
+  onExecuteDeviceAction?: (action: DeviceActionItem) => void;
+  onOpenDeviceHub?: () => void;
   onPreviewFile: (file: MeshFileItem) => void;
   onAskAboutFile: (file: MeshFileItem) => void;
   onShowToast: (msg: string) => void;
@@ -211,10 +223,30 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onSnoozeReminder,
   onSyncReminder,
   onResolveApproval,
+  onExecuteDeviceAction,
+  onOpenDeviceHub,
   onPreviewFile,
   onAskAboutFile,
   onShowToast,
 }) => {
+  const [deviceMenuOpen, setDeviceMenuOpen] = useState(false);
+  const [capturingCap, setCapturingCap] = useState<DeviceCapabilityKey | null>(null);
+
+  const handleInjectDeviceContext = async (cap: DeviceCapabilityKey) => {
+    setCapturingCap(cap);
+    try {
+      const snap = await captureCapabilityContext(cap);
+      setInput((prev) => (prev.trim() ? `${prev.trim()}\n\n${snap.text}` : snap.text));
+      setDeviceMenuOpen(false);
+      onShowToast(`已插入「${snap.title}」到输入框`);
+      textareaRef.current?.focus();
+    } catch (err) {
+      onShowToast(err instanceof Error ? err.message : '获取手机上下文失败');
+    } finally {
+      setCapturingCap(null);
+    }
+  };
+
   const safeSession: SessionRecord = activeSession || {
     id: 'fallback',
     title: '新会话',
@@ -622,6 +654,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                                 onSnoozeReminder={onSnoozeReminder}
                                 onSyncReminder={onSyncReminder}
                                 onResolveApproval={onResolveApproval}
+                                onExecuteDeviceAction={onExecuteDeviceAction}
                                 onPreviewFile={onPreviewFile}
                                 onAskAboutFile={onAskAboutFile}
                               />
@@ -725,10 +758,71 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </div>
           )}
 
+          {/* Phone Context Quick-Inject Popover (Today-inspired) */}
+          <AnimatePresence>
+            {deviceMenuOpen && (
+              <motion.div
+                initial={{ opacity: 0, y: 10, scale: 0.97 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 8, scale: 0.97 }}
+                transition={{ duration: 0.16 }}
+                className="mac-card absolute bottom-full left-0 right-0 mb-2.5 overflow-hidden rounded-3xl border border-stone-200/90 p-3 shadow-lg dark:border-zinc-800"
+              >
+                <div className="mb-2 flex items-center justify-between px-1">
+                  <span className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                    一键附带手机实时上下文
+                  </span>
+                  {onOpenDeviceHub && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setDeviceMenuOpen(false);
+                        onOpenDeviceHub();
+                      }}
+                      className="text-[11px] font-medium text-[#1B6EF3] hover:underline dark:text-blue-400"
+                    >
+                      管理全部权限 →
+                    </button>
+                  )}
+                </div>
+                <div className="grid grid-cols-3 gap-1.5 sm:grid-cols-6">
+                  {(
+                    [
+                      ['clipboard', '剪贴板', Clipboard],
+                      ['calendar', '未来日程', Calendar],
+                      ['notifications', '应用通知', Bell],
+                      ['sms', '最近短信', MessageSquareText],
+                      ['location', '当前位置', MapPin],
+                      ['time', '时间状态', Clock],
+                    ] as [DeviceCapabilityKey, string, React.ComponentType<{ className?: string }>][]
+                  ).map(([cap, label, Icon]) => {
+                    const busy = capturingCap === cap;
+                    return (
+                      <button
+                        key={cap}
+                        type="button"
+                        disabled={Boolean(capturingCap)}
+                        onClick={() => void handleInjectDeviceContext(cap)}
+                        className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-2xl border border-stone-200/70 bg-white/80 px-2 py-2 text-[11px] font-medium text-zinc-700 transition-colors hover:border-[#1B6EF3]/60 hover:text-[#1B6EF3] disabled:opacity-50 dark:border-zinc-800 dark:bg-[#181A20] dark:text-zinc-200 dark:hover:border-blue-500/60 dark:hover:text-blue-400"
+                      >
+                        {busy ? (
+                          <Loader2 className="h-4 w-4 animate-spin text-[#1B6EF3]" />
+                        ) : (
+                          <Icon className="h-4 w-4" />
+                        )}
+                        <span className="whitespace-nowrap">{label}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* Floating Glass Capsule Form */}
           <form
             onSubmit={handleSubmit}
-            className="mac-card flex items-end gap-1.5 rounded-3xl border border-stone-200/90 p-1.5 transition-colors focus-within:border-[#1B6EF3]/70 dark:border-zinc-800 dark:focus-within:border-blue-500/70"
+            className="mac-card flex items-end gap-1 rounded-3xl border border-stone-200/90 p-1.5 transition-colors focus-within:border-[#1B6EF3]/70 dark:border-zinc-800 dark:focus-within:border-blue-500/70"
           >
             <input
               ref={fileInputRef}
@@ -742,9 +836,22 @@ export const ChatView: React.FC<ChatViewProps> = ({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               aria-label="上传图片或文件"
-              className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-stone-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+              className="flex h-10 w-9 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-stone-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
             >
               <Paperclip className="h-[18px] w-[18px]" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setDeviceMenuOpen((v) => !v)}
+              aria-label="附带手机上下文"
+              title="附带手机上下文（剪贴板/日程/通知/短信/位置）"
+              className={`flex h-10 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${
+                deviceMenuOpen
+                  ? 'bg-blue-50 text-[#1B6EF3] dark:bg-blue-950/60 dark:text-blue-400'
+                  : 'text-zinc-500 hover:bg-stone-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100'
+              }`}
+            >
+              <Smartphone className="h-[18px] w-[18px]" />
             </button>
 
             <textarea

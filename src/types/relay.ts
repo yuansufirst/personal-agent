@@ -39,6 +39,47 @@ export interface HealthDailyLog {
   exerciseMinutes: number;
 }
 
+export type DeviceCapabilityKey =
+  | 'time'
+  | 'clipboard'
+  | 'calendar'
+  | 'alarm'
+  | 'notifications'
+  | 'sms'
+  | 'location'
+  | 'files';
+
+export interface DeviceContextConfig {
+  autoAttachTime: boolean;
+  autoAttachCalendar: boolean;
+  autoAttachClipboard: boolean;
+  autoAttachLocation: boolean;
+  autoAttachNotifications: boolean;
+}
+
+export type DeviceActionKind =
+  | 'set_alarm'
+  | 'set_timer'
+  | 'add_calendar_event'
+  | 'write_clipboard'
+  | 'save_file'
+  | 'read_clipboard'
+  | 'read_calendar'
+  | 'read_notifications'
+  | 'read_sms'
+  | 'get_location'
+  | 'list_files';
+
+export interface DeviceActionItem {
+  id: string;
+  action: DeviceActionKind;
+  title: string;
+  summary: string;
+  params: Record<string, unknown>;
+  status: 'pending' | 'executed' | 'failed';
+  resultText?: string;
+}
+
 export interface ConnectionConfig {
   mode: ConnectionMode;
   serverUrl: string;
@@ -140,7 +181,8 @@ export type InteractiveCard =
   | { type: 'briefing'; data: BriefingItem }
   | { type: 'reminder'; data: ReminderItem }
   | { type: 'approval'; data: ApprovalAction }
-  | { type: 'file'; data: MeshFileItem };
+  | { type: 'file'; data: MeshFileItem }
+  | { type: 'device-action'; data: DeviceActionItem };
 
 export interface ChatAttachment {
   name: string;

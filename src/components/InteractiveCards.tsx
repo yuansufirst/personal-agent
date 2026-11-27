@@ -1,20 +1,29 @@
 import React, { useState } from 'react';
 import {
+  AlarmClock,
   ArrowRight,
+  Bell,
   Bookmark,
+  Calendar,
   Check,
   CheckCircle2,
   ChevronDown,
   ChevronUp,
+  Clipboard,
   Clock,
   FileText,
+  FolderOpen,
+  MapPin,
   MessageSquarePlus,
+  Play,
+  Smartphone,
   Terminal,
   XCircle,
 } from 'lucide-react';
 import type {
   ApprovalAction,
   BriefingItem,
+  DeviceActionItem,
   InteractiveCard,
   MeshFileItem,
   ReminderItem,
@@ -60,6 +69,7 @@ interface InteractiveCardRendererProps {
   onSnoozeReminder: (item: ReminderItem) => void;
   onSyncReminder: (item: ReminderItem) => void;
   onResolveApproval: (actionId: string, decision: 'approved' | 'rejected') => void;
+  onExecuteDeviceAction?: (action: DeviceActionItem) => void;
   onPreviewFile: (file: MeshFileItem) => void;
   onAskAboutFile: (file: MeshFileItem) => void;
 }
@@ -79,6 +89,7 @@ export const InteractiveCardRenderer: React.FC<InteractiveCardRendererProps> = (
   onSnoozeReminder,
   onSyncReminder,
   onResolveApproval,
+  onExecuteDeviceAction,
   onPreviewFile,
   onAskAboutFile,
 }) => {
@@ -333,6 +344,81 @@ export const InteractiveCardRenderer: React.FC<InteractiveCardRendererProps> = (
             )}
           </div>
         )}
+      </div>
+    );
+  }
+
+  if (card.type === 'device-action') {
+    const item = card.data;
+    const isReadAction =
+      item.action.startsWith('read_') ||
+      item.action === 'get_location' ||
+      item.action === 'list_files';
+
+    const ActionIcon =
+      item.action === 'set_alarm' || item.action === 'set_timer'
+        ? AlarmClock
+        : item.action === 'add_calendar_event' || item.action === 'read_calendar'
+          ? Calendar
+          : item.action === 'write_clipboard' || item.action === 'read_clipboard'
+            ? Clipboard
+            : item.action === 'get_location'
+              ? MapPin
+              : item.action === 'read_notifications'
+                ? Bell
+                : item.action === 'save_file' || item.action === 'list_files'
+                  ? FolderOpen
+                  : Smartphone;
+
+    return (
+      <div className="mac-card rounded-3xl p-4 sm:p-5">
+        <div className="flex items-start gap-3">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-blue-50 text-[#1B6EF3] dark:bg-blue-950/50 dark:text-blue-400">
+            <ActionIcon className="h-5 w-5" />
+          </div>
+          <div className="min-w-0 flex-1">
+            <div className="text-[11px] font-medium text-[#1B6EF3] dark:text-blue-400">
+              Android 手机原生动作 · {item.action}
+            </div>
+            <h4 className="mt-0.5 text-sm font-semibold text-zinc-950 dark:text-zinc-50">
+              {item.title}
+            </h4>
+            {item.summary && (
+              <p className="mt-0.5 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
+                {item.summary}
+              </p>
+            )}
+          </div>
+        </div>
+
+        <div className="mt-3.5 flex flex-wrap items-center justify-between gap-2 border-t border-stone-100 pt-3 dark:border-zinc-800/80">
+          {item.status === 'executed' ? (
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-emerald-600 dark:text-emerald-400">
+              <CheckCircle2 className="h-4 w-4" />
+              <span>{item.resultText || '已在手机上执行完成'}</span>
+            </span>
+          ) : item.status === 'failed' ? (
+            <span className="inline-flex items-center gap-1.5 text-xs font-medium text-rose-600 dark:text-rose-400">
+              <XCircle className="h-4 w-4" />
+              <span>{item.resultText || '执行失败'}</span>
+            </span>
+          ) : (
+            <span className="text-[11px] text-zinc-400">
+              {isReadAction ? '点击授权读取并自动回传给云端助理' : '确认参数无误后点击立即在手机执行'}
+            </span>
+          )}
+
+          {item.status !== 'executed' && onExecuteDeviceAction && (
+            <button
+              type="button"
+              onClick={() => onExecuteDeviceAction(item)}
+              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-zinc-950 px-3.5 py-1.5 text-xs font-medium text-white transition-transform active:scale-95 hover:bg-[#1B6EF3] dark:bg-[#1B6EF3] dark:hover:bg-blue-600 whitespace-nowrap shrink-0"
+            >
+              <Play className="h-3.5 w-3.5 fill-current" />
+              <span>{isReadAction ? '读取并回传' : '立即执行'}</span>
+            </button>
+          )}
+        </div>
       </div>
     );
   }

@@ -30,10 +30,10 @@ export function extractRelayCards(rawText: string): {
   cards: InteractiveCard[];
 } {
   const cards: InteractiveCard[] = [];
-  const blockRegex = /```relay-card\s*([\s\S]*?)```/g;
+  const cardRegex = /```relay-card\s*([\s\S]*?)```/g;
   let match: RegExpExecArray | null;
 
-  while ((match = blockRegex.exec(rawText)) !== null) {
+  while ((match = cardRegex.exec(rawText)) !== null) {
     try {
       const parsed = JSON.parse(match[1].trim());
       if (parsed && typeof parsed === 'object' && parsed.type && parsed.data) {
@@ -44,7 +44,36 @@ export function extractRelayCards(rawText: string): {
     }
   }
 
-  const cleanText = rawText.replace(blockRegex, '').trim();
+  const actionRegex = /```relay-action\s*([\s\S]*?)```/g;
+  let actionIdx = 0;
+  while ((match = actionRegex.exec(rawText)) !== null) {
+    try {
+      const parsed = JSON.parse(match[1].trim());
+      if (parsed && typeof parsed === 'object' && typeof parsed.action === 'string') {
+        cards.push({
+          type: 'device-action',
+          data: {
+            id: `dev-act-${actionIdx++}-${parsed.action}`,
+            action: parsed.action,
+            title: String(parsed.title || '手机设备操作'),
+            summary: String(parsed.summary || ''),
+            params:
+              parsed.params && typeof parsed.params === 'object'
+                ? (parsed.params as Record<string, unknown>)
+                : {},
+            status: 'pending',
+          },
+        });
+      }
+    } catch {
+      // Ignore partial JSON while streaming
+    }
+  }
+
+  const cleanText = rawText
+    .replace(cardRegex, '')
+    .replace(actionRegex, '')
+    .trim();
   return { cleanText, cards };
 }
 

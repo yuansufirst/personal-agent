@@ -16,6 +16,7 @@ public class MainActivity extends BridgeActivity {
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(DshSocketPlugin.class);
         registerPlugin(NativeSpeechPlugin.class);
+        registerPlugin(DeviceBridgePlugin.class);
         super.onCreate(savedInstanceState);
 
         // Ensure Android 15+ forced edge-to-edge never overlaps top status bar or bottom navigation bar
