@@ -32,6 +32,8 @@ export interface SpeechSessionHandle {
 export interface StartVoiceOptions {
   /** 服务器地址，配了就走「自己录音 + 服务器 SenseVoice 转写」这条路 */
   serverUrl?: string;
+  /** 录音结束到转写完成之间置 true，用来显示「识别中」 */
+  onBusyChange?: (busy: boolean) => void;
 }
 
 export async function startVoiceRecognition(
@@ -51,6 +53,7 @@ export async function startVoiceRecognition(
         onTranscript: (text) => callbacks.onTranscript(text, true),
         onStateChange: callbacks.onStateChange,
         onError: callbacks.onError,
+        onBusyChange: options.onBusyChange,
       });
       if (session) return session;
     } catch {

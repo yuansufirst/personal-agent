@@ -229,6 +229,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [processingFiles, setProcessingFiles] = useState(false);
   const [listening, setListening] = useState(false);
+  const [transcribing, setTranscribing] = useState(false);
   const [sessionSheetOpen, setSessionSheetOpen] = useState(false);
   const [sessionSearch, setSessionSearch] = useState('');
   const [manualSessionInput, setManualSessionInput] = useState('');
@@ -394,7 +395,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
           onShowToast(msg);
         },
       },
-      { serverUrl: config.serverUrl }
+      { serverUrl: config.serverUrl, onBusyChange: setTranscribing }
     );
 
     if (session) {
@@ -753,7 +754,13 @@ export const ChatView: React.FC<ChatViewProps> = ({
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={handleKeyDown}
               onPaste={handlePaste}
-              placeholder={listening ? '正在录音…再点一下麦克风结束' : '发消息，或输入 / 指令…'}
+              placeholder={
+                listening
+                  ? '正在录音…说完停一下会自动结束'
+                  : transcribing
+                    ? '正在识别…'
+                    : '发消息，或输入 / 指令…'
+              }
               className={`max-h-36 min-h-[40px] flex-1 resize-none bg-transparent px-1.5 py-2 text-[14px] leading-6 text-zinc-900 placeholder:text-zinc-400 focus:outline-none dark:text-zinc-100 dark:placeholder:text-zinc-500 ${
                 !input ? 'h-[40px] overflow-hidden whitespace-nowrap' : ''
               }`}

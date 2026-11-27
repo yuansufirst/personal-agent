@@ -27,6 +27,7 @@ export interface VoiceInputCallbacks {
   onTranscript: (transcript: string) => void;
   onStateChange: (listening: boolean) => void;
   onError: (message: string) => void;
+  onBusyChange?: (busy: boolean) => void;
 }
 
 interface CaptureSource {
@@ -221,6 +222,7 @@ export async function transcribePcm(
       audio: pcmToBase64(captured.pcm),
       sampleRate: captured.sampleRate,
       language: 'zh',
+      clientTs: Date.now(),
     }),
   });
 
@@ -272,6 +274,7 @@ export async function startServerVoiceInput(
     if (finishing) return;
     finishing = true;
     callbacks.onStateChange(false);
+    callbacks.onBusyChange?.(true);
     let recorded: CapturedPcm | null = null;
     try {
       recorded = await capture.stop();
@@ -293,6 +296,8 @@ export async function startServerVoiceInput(
         ? `（${(recorded.durationMs / 1000).toFixed(1)}s / ${Math.round(recorded.pcm.byteLength / 1024)}KB）`
         : '';
       callbacks.onError(`语音失败：${reason}${detail}`);
+    } finally {
+      callbacks.onBusyChange?.(false);
     }
   };
 
