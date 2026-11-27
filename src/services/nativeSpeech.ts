@@ -1,25 +1,6 @@
-import { Capacitor, registerPlugin, type PluginListenerHandle } from '@capacitor/core';
-import { startPcmCapture, transcribePcm } from './voiceCapture';
-
-interface NativeSpeechPlugin {
-  start(options?: { language?: string }): Promise<{ mode?: string; transcript?: string }>;
-  startDialog(options?: { language?: string }): Promise<{ mode?: string; transcript?: string }>;
-  stop(): Promise<void>;
-  addListener(
-    eventName: 'speechResult',
-    listenerFunc: (event: { transcript: string; isFinal: boolean }) => void
-  ): Promise<PluginListenerHandle>;
-  addListener(
-    eventName: 'speechState',
-    listenerFunc: (event: { listening: boolean }) => void
-  ): Promise<PluginListenerHandle>;
-  addListener(
-    eventName: 'speechError',
-    listenerFunc: (event: { message: string; code?: number; fallbackAvailable?: boolean }) => void
-  ): Promise<PluginListenerHandle>;
-}
-
-const NativeSpeech = registerPlugin<NativeSpeechPlugin>('NativeSpeech');
+import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
+import { startServerVoiceInput } from './voiceCapture';
+import { NativeSpeech } from './speechPlugin';
 
 interface SpeechRecognitionAlternativeLike {
   transcript: string;
@@ -61,44 +42,19 @@ export async function startVoiceRecognition(
   },
   options?: StartVoiceOptions
 ): Promise<SpeechSessionHandle | null> {
-  // 0) 首选：自己录音 + 上传服务器转写。
+  // 0) 首选：自己录音（原生 AudioRecord 优先）+ 服务器 SenseVoice 转写。
   // 部分国产 ROM 的系统语音服务即使授权了也会回「缺少麦克风权限」，
   // 自己录音不依赖它，权限拿得到就能用。
   if (options?.serverUrl) {
-    const serverUrl = options.serverUrl;
-    let captureHandle: Awaited<ReturnType<typeof startPcmCapture>> | null = null;
     try {
-      captureHandle = await startPcmCapture(() => callbacks.onStateChange(false));
+      const session = await startServerVoiceInput(options.serverUrl, {
+        onTranscript: (text) => callbacks.onTranscript(text, true),
+        onStateChange: callbacks.onStateChange,
+        onError: callbacks.onError,
+      });
+      if (session) return session;
     } catch {
-      captureHandle = null;
-    }
-    if (captureHandle) {
-      const capture = captureHandle;
-      callbacks.onStateChange(true);
-      return {
-        stop: () => {
-          callbacks.onStateChange(false);
-          void (async () => {
-            try {
-              const recorded = await capture.stop();
-              if (recorded.durationMs < 300 || recorded.pcm.length === 0) {
-                callbacks.onError('说话时间太短，再按一次试试');
-                return;
-              }
-              const controller = new AbortController();
-              const timer = window.setTimeout(() => controller.abort(), 60_000);
-              try {
-                const text = await transcribePcm(serverUrl, recorded, controller.signal);
-                callbacks.onTranscript(text, true);
-              } finally {
-                window.clearTimeout(timer);
-              }
-            } catch (err) {
-              callbacks.onError(err instanceof Error ? err.message : '语音转写失败，请重试');
-            }
-          })();
-        },
-      };
+      // 录音起不来（没权限/被占用）就继续走系统识别的老路
     }
   }
 

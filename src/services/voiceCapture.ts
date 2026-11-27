@@ -1,15 +1,17 @@
 /**
- * 手机端录音 + 服务器转写。
+ * 语音输入：自己录音（原生 AudioRecord 优先，网页 getUserMedia 兜底），
+ * 把 16kHz 单声道 PCM 发给服务器的 /api/transcribe（SenseVoice）转文字。
  *
  * 为什么不走系统 SpeechRecognizer：部分国产 ROM（小米 HyperOS 等）即使已授予
  * RECORD_AUDIO，语音识别服务仍会回 ERROR_INSUFFICIENT_PERMISSIONS(9)，
  * 表现为「点麦克风没反应/提示缺少麦克风权限」。
- * 这里改成自己用 getUserMedia 录音，前端降到 16kHz PCM，POST 给服务器的
- * /api/transcribe（SenseVoice），绕开系统语音服务。
  */
+import { Capacitor, type PluginListenerHandle } from '@capacitor/core';
+import { NativeSpeech } from './speechPlugin';
 
 const TARGET_SAMPLE_RATE = 16000;
 const MAX_RECORD_MS = 60_000;
+const MIN_SPEECH_MS = 300;
 
 export interface CapturedPcm {
   pcm: Int16Array;
@@ -17,7 +19,17 @@ export interface CapturedPcm {
   durationMs: number;
 }
 
-export interface VoiceCaptureHandle {
+export interface VoiceSessionHandle {
+  stop: () => void;
+}
+
+export interface VoiceInputCallbacks {
+  onTranscript: (transcript: string) => void;
+  onStateChange: (listening: boolean) => void;
+  onError: (message: string) => void;
+}
+
+interface CaptureSource {
   stop: () => Promise<CapturedPcm>;
 }
 
@@ -29,6 +41,15 @@ function getAudioContextCtor(): AudioContextCtor | null {
     webkitAudioContext?: AudioContextCtor;
   };
   return win.AudioContext || win.webkitAudioContext || null;
+}
+
+function base64ToPcm16(base64: string): Int16Array {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
+  const aligned = new Uint8Array(bytes.length - (bytes.length % 2));
+  aligned.set(bytes.subarray(0, aligned.length));
+  return new Int16Array(aligned.buffer);
 }
 
 /** 线性插值重采样到 16k，够语音识别用了。 */
@@ -67,15 +88,51 @@ function concatFloat32(chunks: Float32Array[], total: number): Float32Array {
   return merged;
 }
 
-/**
- * 开始录音。返回的 stop() 会停下麦克风并给出 16k 单声道 PCM。
- */
-export async function startPcmCapture(onAutoStop?: () => void): Promise<VoiceCaptureHandle> {
-  const AudioCtor = getAudioContextCtor();
-  if (!AudioCtor) throw new Error('当前环境不支持录音（缺少 AudioContext）');
-  if (!navigator.mediaDevices?.getUserMedia) {
-    throw new Error('当前环境不支持麦克风录音');
+/** Int16 PCM → base64（分块，避免大数组爆栈）。 */
+export function pcmToBase64(pcm: Int16Array): string {
+  const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
+  const chunkSize = 0x8000;
+  let binary = '';
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    const slice = bytes.subarray(i, i + chunkSize);
+    binary += String.fromCharCode.apply(null, Array.from(slice));
   }
+  return btoa(binary);
+}
+
+/** 原生录音（APK 内 AudioRecord，权限拿到了就一定能录）。 */
+async function startNativeCapture(onAutoStop: () => void): Promise<CaptureSource | null> {
+  if (!Capacitor.isNativePlatform() || !Capacitor.isPluginAvailable('NativeSpeech')) return null;
+  const handles: PluginListenerHandle[] = [];
+  try {
+    handles.push(
+      await NativeSpeech.addListener('recordAutoStop', () => {
+        onAutoStop();
+      })
+    );
+    await NativeSpeech.startRecording();
+  } catch {
+    for (const handle of handles) void handle.remove();
+    return null;
+  }
+  return {
+    stop: async () => {
+      for (const handle of handles) void handle.remove();
+      const res = await NativeSpeech.stopRecording();
+      return {
+        pcm: base64ToPcm16(res.audio || ''),
+        sampleRate: res.sampleRate || TARGET_SAMPLE_RATE,
+        durationMs: res.durationMs || 0,
+      };
+    },
+  };
+}
+
+/** 网页录音（PWA / 浏览器 / 原生不可用时的兜底）。 */
+async function startWebCapture(onAutoStop: () => void): Promise<CaptureSource | null> {
+  const AudioCtor = getAudioContextCtor();
+  if (!AudioCtor) return null;
+  if (!navigator.mediaDevices?.getUserMedia) return null;
 
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
@@ -88,6 +145,7 @@ export async function startPcmCapture(onAutoStop?: () => void): Promise<VoiceCap
   });
 
   const context = new AudioCtor();
+  void context.resume().catch(() => undefined);
   const source = context.createMediaStreamSource(stream);
   const processor = context.createScriptProcessor(4096, 1, 1);
   const chunks: Float32Array[] = [];
@@ -125,12 +183,8 @@ export async function startPcmCapture(onAutoStop?: () => void): Promise<VoiceCap
   };
 
   const hardStop = window.setTimeout(() => {
-    try {
-      teardown();
-      onAutoStop?.();
-    } catch {
-      // ignore
-    }
+    teardown();
+    onAutoStop();
   }, MAX_RECORD_MS);
 
   return {
@@ -147,18 +201,6 @@ export async function startPcmCapture(onAutoStop?: () => void): Promise<VoiceCap
       };
     },
   };
-}
-
-/** Int16 PCM → base64（分块，避免大数组爆栈）。 */
-export function pcmToBase64(pcm: Int16Array): string {
-  const bytes = new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength);
-  const chunkSize = 0x8000;
-  let binary = '';
-  for (let i = 0; i < bytes.length; i += chunkSize) {
-    const slice = bytes.subarray(i, i + chunkSize);
-    binary += String.fromCharCode.apply(null, Array.from(slice));
-  }
-  return btoa(binary);
 }
 
 /** 把录音发给服务器转写，返回识别文本。 */
@@ -195,4 +237,68 @@ export async function transcribePcm(
   const text = (data.text || '').trim();
   if (!text) throw new Error('没听清，再说一次试试');
   return text;
+}
+
+/**
+ * 启动「本地录音 + 服务器转写」的语音输入。
+ * 返回 null 表示这台设备录不了音（没权限 / 不支持），调用方可以退回系统识别。
+ */
+export async function startServerVoiceInput(
+  serverUrl: string,
+  callbacks: VoiceInputCallbacks
+): Promise<VoiceSessionHandle | null> {
+  let autoStopRef: (() => void) | null = null;
+  const triggerAutoStop = () => autoStopRef?.();
+
+  let source: CaptureSource | null = null;
+  try {
+    source = await startNativeCapture(triggerAutoStop);
+  } catch {
+    source = null;
+  }
+  if (!source) {
+    try {
+      source = await startWebCapture(triggerAutoStop);
+    } catch (err) {
+      throw new Error(err instanceof Error ? err.message : '麦克风启动失败');
+    }
+  }
+  if (!source) return null;
+
+  const capture = source;
+  let finishing = false;
+
+  const finish = async () => {
+    if (finishing) return;
+    finishing = true;
+    callbacks.onStateChange(false);
+    try {
+      const recorded = await capture.stop();
+      if (recorded.durationMs < MIN_SPEECH_MS || recorded.pcm.length === 0) {
+        callbacks.onError('说话时间太短，再按一次试试');
+        return;
+      }
+      const controller = new AbortController();
+      const timer = window.setTimeout(() => controller.abort(), 60_000);
+      try {
+        const text = await transcribePcm(serverUrl, recorded, controller.signal);
+        callbacks.onTranscript(text);
+      } finally {
+        window.clearTimeout(timer);
+      }
+    } catch (err) {
+      callbacks.onError(err instanceof Error ? err.message : '语音转写失败，请重试');
+    }
+  };
+
+  autoStopRef = () => {
+    void finish();
+  };
+  callbacks.onStateChange(true);
+
+  return {
+    stop: () => {
+      void finish();
+    },
+  };
 }
