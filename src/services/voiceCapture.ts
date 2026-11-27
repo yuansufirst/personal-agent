@@ -13,10 +13,12 @@ const TARGET_SAMPLE_RATE = 16000;
 const MAX_RECORD_MS = 60_000;
 const MIN_SPEECH_MS = 300;
 
-export interface CapturedPcm {
-  pcm: Int16Array;
+export interface CapturedAudio {
+  base64: string;
+  format: 'pcm16' | 'aac';
   sampleRate: number;
   durationMs: number;
+  bytes: number;
 }
 
 export interface VoiceSessionHandle {
@@ -31,7 +33,7 @@ export interface VoiceInputCallbacks {
 }
 
 interface CaptureSource {
-  stop: () => Promise<CapturedPcm>;
+  stop: () => Promise<CapturedAudio>;
 }
 
 type AudioContextCtor = new (options?: AudioContextOptions) => AudioContext;
@@ -44,14 +46,6 @@ function getAudioContextCtor(): AudioContextCtor | null {
   return win.AudioContext || win.webkitAudioContext || null;
 }
 
-function base64ToPcm16(base64: string): Int16Array {
-  const binary = atob(base64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i += 1) bytes[i] = binary.charCodeAt(i);
-  const aligned = new Uint8Array(bytes.length - (bytes.length % 2));
-  aligned.set(bytes.subarray(0, aligned.length));
-  return new Int16Array(aligned.buffer);
-}
 
 /** 线性插值重采样到 16k，够语音识别用了。 */
 function resampleTo16k(input: Float32Array, inputRate: number): Float32Array {
@@ -120,10 +114,13 @@ async function startNativeCapture(onAutoStop: () => void): Promise<CaptureSource
     stop: async () => {
       for (const handle of handles) void handle.remove();
       const res = await NativeSpeech.stopRecording();
+      const base64 = res.audio || '';
       return {
-        pcm: base64ToPcm16(res.audio || ''),
+        base64,
+        format: (res.format === 'pcm16' ? 'pcm16' : 'aac'),
         sampleRate: res.sampleRate || TARGET_SAMPLE_RATE,
         durationMs: res.durationMs || 0,
+        bytes: Math.floor((base64.length * 3) / 4),
       };
     },
   };
@@ -195,10 +192,14 @@ async function startWebCapture(onAutoStop: () => void): Promise<CaptureSource | 
       teardown();
       const raw = total > 0 ? concatFloat32(chunks, total) : new Float32Array(0);
       const resampled = resampleTo16k(raw, inputRate);
+      const pcm = floatToPcm16(resampled);
+      const base64 = pcmToBase64(pcm);
       return {
-        pcm: floatToPcm16(resampled),
+        base64,
+        format: 'pcm16',
         sampleRate: TARGET_SAMPLE_RATE,
         durationMs: Math.round((raw.length / inputRate) * 1000),
+        bytes: pcm.byteLength,
       };
     },
   };
@@ -207,19 +208,20 @@ async function startWebCapture(onAutoStop: () => void): Promise<CaptureSource | 
 /** 把录音发给服务器转写，返回识别文本。 */
 export async function transcribePcm(
   serverUrl: string,
-  captured: CapturedPcm,
+  captured: CapturedAudio,
   signal?: AbortSignal
 ): Promise<string> {
   const base = (serverUrl || '').trim().replace(/\/+$/, '');
   if (!base) throw new Error('未配置服务器地址，无法上传语音');
-  if (captured.pcm.length === 0) throw new Error('没有录到声音，请重试');
+  if (!captured.base64) throw new Error('没有录到声音，请重试');
 
   const res = await fetch(`${base}/api/transcribe`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     signal,
     body: JSON.stringify({
-      audio: pcmToBase64(captured.pcm),
+      audio: captured.base64,
+      format: captured.format,
       sampleRate: captured.sampleRate,
       language: 'zh',
       clientTs: Date.now(),
@@ -275,10 +277,10 @@ export async function startServerVoiceInput(
     finishing = true;
     callbacks.onStateChange(false);
     callbacks.onBusyChange?.(true);
-    let recorded: CapturedPcm | null = null;
+    let recorded: CapturedAudio | null = null;
     try {
       recorded = await capture.stop();
-      if (recorded.durationMs < MIN_SPEECH_MS || recorded.pcm.length === 0) {
+      if (recorded.durationMs < MIN_SPEECH_MS || recorded.bytes === 0) {
         callbacks.onError('说话时间太短，再按一次试试');
         return;
       }
@@ -293,7 +295,7 @@ export async function startServerVoiceInput(
     } catch (err) {
       const reason = err instanceof Error ? err.message : '语音转写失败，请重试';
       const detail = recorded
-        ? `（${(recorded.durationMs / 1000).toFixed(1)}s / ${Math.round(recorded.pcm.byteLength / 1024)}KB）`
+        ? `（${(recorded.durationMs / 1000).toFixed(1)}s / ${Math.round(recorded.bytes / 1024)}KB）`
         : '';
       callbacks.onError(`语音失败：${reason}${detail}`);
     } finally {

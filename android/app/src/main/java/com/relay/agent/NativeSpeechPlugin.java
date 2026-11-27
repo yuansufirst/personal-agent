@@ -9,8 +9,6 @@ import android.os.Looper;
 import android.speech.RecognitionListener;
 import android.speech.RecognizerIntent;
 import android.speech.SpeechRecognizer;
-import android.media.AudioFormat;
-import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.util.Base64;
 
@@ -26,7 +24,7 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import com.getcapacitor.annotation.Permission;
 import com.getcapacitor.annotation.PermissionCallback;
 
-import java.io.ByteArrayOutputStream;
+import java.io.File;
 import java.util.ArrayList;
 
 /**
@@ -41,16 +39,13 @@ import java.util.ArrayList;
     }
 )
 public class NativeSpeechPlugin extends Plugin {
-    private static final int RECORD_SAMPLE_RATE = 16000;
     private static final int MAX_RECORD_SECONDS = 60;
 
-    private SpeechRecognizer recognizer;
-    private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private boolean isListening = false;
-
-    private AudioRecord audioRecord;
-    private Thread recordThread;
-    private ByteArrayOutputStream recordBuffer;
+    private MediaRecorder mediaRecorder;
+    private File recordFile;
+    private boolean mediaRecorderStopped = false;
+    private Handler amplitudeHandler;
+    private Runnable amplitudeTask;
     private volatile boolean recording = false;
     private long recordStartedAt = 0L;
     private String pendingAction = null;
@@ -71,7 +66,7 @@ public class NativeSpeechPlugin extends Plugin {
         pendingAction = null;
         if (getPermissionState("audio") == PermissionState.GRANTED) {
             if ("record".equals(action)) {
-                startAudioRecord(call);
+                startAacRecording(call);
             } else {
                 startRecognitionInternal(call);
             }
@@ -81,8 +76,9 @@ public class NativeSpeechPlugin extends Plugin {
     }
 
     /**
-     * 自己用 AudioRecord 录 16k 单声道 PCM，绕开系统语音识别服务。
-     * 录完由 stopRecording 一次性返回 base64，交给服务器转写。
+     * 自己用 MediaRecorder 录 AAC（24kbps，约 3KB/s），走服务器转写。
+     * 系统 SpeechRecognizer 在部分 ROM 上会拒绝，且 PCM 原样上传太慢，
+     * AAC 能把体积压到 1/8 左右。
      */
     @PluginMethod
     public void startRecording(PluginCall call) {
@@ -91,36 +87,36 @@ public class NativeSpeechPlugin extends Plugin {
             requestPermissionForAlias("audio", call, "audioPermissionCallback");
             return;
         }
-        startAudioRecord(call);
+        startAacRecording(call);
     }
 
-    private void startAudioRecord(PluginCall call) {
+    private void startAacRecording(PluginCall call) {
         mainHandler.post(() -> {
             try {
                 stopRecordingInternal();
-                int minBuffer = AudioRecord.getMinBufferSize(
-                    RECORD_SAMPLE_RATE,
-                    AudioFormat.CHANNEL_IN_MONO,
-                    AudioFormat.ENCODING_PCM_16BIT
-                );
-                int bufferSize = Math.max(minBuffer * 2, RECORD_SAMPLE_RATE);
-                audioRecord = createAudioRecord(MediaRecorder.AudioSource.MIC, bufferSize);
-                if (audioRecord == null) {
-                    audioRecord = createAudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, bufferSize);
+                File dir = getContext().getCacheDir();
+                recordFile = new File(dir, "relay-voice-" + System.currentTimeMillis() + ".m4a");
+                mediaRecorder = new MediaRecorder();
+                mediaRecorder.setAudioSource(MediaRecorder.AudioSource.MIC);
+                mediaRecorder.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4);
+                mediaRecorder.setAudioEncoder(MediaRecorder.AudioEncoder.AAC);
+                mediaRecorder.setAudioChannels(1);
+                mediaRecorder.setAudioEncodingBitRate(24000);
+                try {
+                    mediaRecorder.setAudioSamplingRate(16000);
+                } catch (Exception ignored) {
+                    mediaRecorder.setAudioSamplingRate(44100);
                 }
-                if (audioRecord == null) {
-                    call.reject("麦克风初始化失败，可能被其他应用占用");
-                    return;
-                }
-                recordBuffer = new ByteArrayOutputStream(RECORD_SAMPLE_RATE * 2 * 8);
-                recordStartedAt = System.currentTimeMillis();
+                mediaRecorder.setOutputFile(recordFile.getAbsolutePath());
+                mediaRecorder.prepare();
+                mediaRecorder.start();
+                mediaRecorderStopped = false;
                 recording = true;
-                audioRecord.startRecording();
-                recordThread = new Thread(this::recordLoop, "relay-audio-record");
-                recordThread.start();
+                recordStartedAt = System.currentTimeMillis();
+                startAmplitudePolling();
                 JSObject res = new JSObject();
                 res.put("started", true);
-                res.put("sampleRate", RECORD_SAMPLE_RATE);
+                res.put("format", "aac");
                 call.resolve(res);
             } catch (Exception e) {
                 stopRecordingInternal();
@@ -129,95 +125,68 @@ public class NativeSpeechPlugin extends Plugin {
         });
     }
 
-    private AudioRecord createAudioRecord(int source, int bufferSize) {
-        try {
-            AudioRecord record = new AudioRecord(
-                source,
-                RECORD_SAMPLE_RATE,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                bufferSize
-            );
-            if (record.getState() == AudioRecord.STATE_INITIALIZED) {
-                return record;
-            }
-            record.release();
-        } catch (Exception ignored) {
-            // try next source
-        }
-        return null;
-    }
-
-    private void recordLoop() {
-        byte[] chunk = new byte[3200]; // ~100ms
-        int maxBytes = RECORD_SAMPLE_RATE * 2 * MAX_RECORD_SECONDS;
-        boolean speechSeen = false;
-        long silenceSince = 0L;
-        long lastLevelAt = 0L;
-        while (recording && audioRecord != null) {
-            int read;
-            try {
-                read = audioRecord.read(chunk, 0, chunk.length);
-            } catch (Exception e) {
-                break;
-            }
-            if (read <= 0) continue;
-            if (recordBuffer != null) {
-                recordBuffer.write(chunk, 0, read);
-            }
-            long now = System.currentTimeMillis();
-            if (now - lastLevelAt >= 120) {
-                lastLevelAt = now;
-                double rms = rmsOf(chunk, read);
-                final double level = Math.min(1.0, rms / 8000.0);
-                mainHandler.post(() -> {
-                    JSObject payload = new JSObject();
-                    payload.put("level", level);
-                    notifyListeners("recordLevel", payload);
-                });
-                if (rms > 1200) {
-                    speechSeen = true;
-                    silenceSince = 0L;
-                } else if (speechSeen && silenceSince == 0L) {
-                    silenceSince = now;
+    private void startAmplitudePolling() {
+        stopAmplitudePolling();
+        amplitudeHandler = new Handler(Looper.getMainLooper());
+        final long startedAt = System.currentTimeMillis();
+        final boolean[] speechSeen = { false };
+        final long[] silenceSince = { 0L };
+        amplitudeTask = new Runnable() {
+            @Override
+            public void run() {
+                if (!recording || mediaRecorder == null) return;
+                int amplitude = 0;
+                try {
+                    amplitude = mediaRecorder.getMaxAmplitude();
+                } catch (Exception ignored) {
+                    // ignore
                 }
+                long now = System.currentTimeMillis();
+                JSObject payload = new JSObject();
+                payload.put("level", Math.min(1.0, amplitude / 12000.0));
+                notifyListeners("recordLevel", payload);
+                if (amplitude > 2500) {
+                    speechSeen[0] = true;
+                    silenceSince[0] = 0L;
+                } else if (speechSeen[0] && silenceSince[0] == 0L) {
+                    silenceSince[0] = now;
+                }
+                boolean tooLong = now - startedAt > MAX_RECORD_SECONDS * 1000L;
+                boolean silentEnd = speechSeen[0]
+                    && now - startedAt > 1500L
+                    && silenceSince[0] > 0L
+                    && now - silenceSince[0] > 1500L;
+                if (tooLong || silentEnd) {
+                    autoStopRecording();
+                    return;
+                }
+                amplitudeHandler.postDelayed(this, 120);
             }
-            if (recordBuffer != null && recordBuffer.size() >= maxBytes) {
-                autoStopRecording();
-                break;
-            }
-            if (speechSeen
-                && now - recordStartedAt > 1500
-                && silenceSince > 0L
-                && now - silenceSince > 1500) {
-                autoStopRecording();
-                break;
-            }
-        }
+        };
+        amplitudeHandler.postDelayed(amplitudeTask, 150);
     }
 
-    private double rmsOf(byte[] data, int length) {
-        long sum = 0L;
-        int count = 0;
-        for (int i = 0; i + 1 < length; i += 2) {
-            int sample = (short) ((data[i] & 0xff) | (data[i + 1] << 8));
-            sum += (long) sample * sample;
-            count += 1;
+    private void stopAmplitudePolling() {
+        if (amplitudeHandler != null && amplitudeTask != null) {
+            amplitudeHandler.removeCallbacks(amplitudeTask);
         }
-        return Math.sqrt((double) sum / Math.max(1, count));
+        amplitudeTask = null;
+        amplitudeHandler = null;
     }
 
     private void autoStopRecording() {
-        recording = false;
-        if (audioRecord != null) {
-            try {
-                audioRecord.stop();
-            } catch (Exception ignored) {
-                // ignore
-            }
-        }
         final long durationMs = System.currentTimeMillis() - recordStartedAt;
         mainHandler.post(() -> {
+            try {
+                if (mediaRecorder != null && !mediaRecorderStopped) {
+                    mediaRecorder.stop();
+                    mediaRecorderStopped = true;
+                }
+            } catch (Exception ignored) {
+                // 录音太短时 stop 会抛异常，忽略
+            }
+            recording = false;
+            stopAmplitudePolling();
             JSObject payload = new JSObject();
             payload.put("durationMs", durationMs);
             notifyListeners("recordAutoStop", payload);
@@ -229,32 +198,48 @@ public class NativeSpeechPlugin extends Plugin {
         mainHandler.post(() -> {
             try {
                 recording = false;
-                if (recordThread != null) {
-                    try {
-                        recordThread.join(1500);
-                    } catch (InterruptedException ignored) {
-                        // ignore
+                stopAmplitudePolling();
+                if (mediaRecorder != null) {
+                    if (!mediaRecorderStopped) {
+                        try {
+                            mediaRecorder.stop();
+                        } catch (Exception ignored) {
+                            // ignore
+                        }
                     }
-                    recordThread = null;
-                }
-                if (audioRecord != null) {
                     try {
-                        audioRecord.stop();
+                        mediaRecorder.release();
                     } catch (Exception ignored) {
                         // ignore
                     }
-                    audioRecord.release();
-                    audioRecord = null;
+                    mediaRecorder = null;
+                    mediaRecorderStopped = false;
                 }
-                byte[] data = recordBuffer != null ? recordBuffer.toByteArray() : new byte[0];
-                recordBuffer = null;
+                File file = recordFile;
+                recordFile = null;
+                byte[] data = new byte[0];
+                if (file != null && file.exists()) {
+                    try (java.io.FileInputStream in = new java.io.FileInputStream(file)) {
+                        java.io.ByteArrayOutputStream out = new java.io.ByteArrayOutputStream((int) file.length());
+                        byte[] buffer = new byte[8192];
+                        int read;
+                        while ((read = in.read(buffer)) > 0) {
+                            out.write(buffer, 0, read);
+                        }
+                        data = out.toByteArray();
+                    } catch (Exception ignored) {
+                        // ignore
+                    }
+                    //noinspection ResultOfMethodCallIgnored
+                    file.delete();
+                }
                 if (data.length == 0) {
                     call.reject("没有录到声音，请重试");
                     return;
                 }
                 JSObject res = new JSObject();
                 res.put("audio", Base64.encodeToString(data, Base64.NO_WRAP));
-                res.put("sampleRate", RECORD_SAMPLE_RATE);
+                res.put("format", "aac");
                 res.put("durationMs", System.currentTimeMillis() - recordStartedAt);
                 call.resolve(res);
             } catch (Exception e) {
@@ -266,24 +251,28 @@ public class NativeSpeechPlugin extends Plugin {
 
     private void stopRecordingInternal() {
         recording = false;
-        if (recordThread != null) {
+        stopAmplitudePolling();
+        if (mediaRecorder != null) {
             try {
-                recordThread.join(800);
-            } catch (InterruptedException ignored) {
-                // ignore
-            }
-            recordThread = null;
-        }
-        if (audioRecord != null) {
-            try {
-                audioRecord.stop();
+                if (!mediaRecorderStopped) {
+                    mediaRecorder.stop();
+                }
             } catch (Exception ignored) {
                 // ignore
             }
-            audioRecord.release();
-            audioRecord = null;
+            try {
+                mediaRecorder.release();
+            } catch (Exception ignored) {
+                // ignore
+            }
+            mediaRecorder = null;
         }
-        recordBuffer = null;
+        mediaRecorderStopped = false;
+        if (recordFile != null) {
+            //noinspection ResultOfMethodCallIgnored
+            recordFile.delete();
+            recordFile = null;
+        }
     }
 
     private Intent buildSpeechIntent(String language) {

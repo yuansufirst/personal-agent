@@ -25,7 +25,8 @@ export interface RecordAutoStopEvent {
 
 export interface RecordedAudioEvent {
   audio: string;
-  sampleRate: number;
+  format?: string;
+  sampleRate?: number;
   durationMs: number;
 }
 
