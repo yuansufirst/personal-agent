@@ -11,6 +11,7 @@ import {
   Copy,
   FileText,
   Image as ImageIcon,
+  LayoutGrid,
   Loader2,
   MapPin,
   MessageSquareText,
@@ -20,8 +21,11 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Send,
   Smartphone,
+  Sparkles,
   Square,
+  Terminal,
   Trash2,
   X,
 } from 'lucide-react';
@@ -33,6 +37,7 @@ import type {
   ConnectionConfig,
   DeviceActionItem,
   DeviceCapabilityKey,
+  MapCardItem,
   MeshFileItem,
   ReminderItem,
   SessionRecord,
@@ -44,6 +49,11 @@ import { AgentTraceBlock } from './AgentTraceBlock';
 import { resolveAvatarSrc } from '../services/avatarPresets';
 import { startVoiceRecognition, type SpeechSessionHandle } from '../services/nativeSpeech';
 import { captureCapabilityContext } from '../services/deviceBridge';
+import {
+  INTERACTIVE_CARD_TRIGGERS,
+  RELAY_CARDS_PROTOCOL_PROMPT,
+  type CardQuickTrigger,
+} from '../services/cardProtocol';
 
 interface ChatViewProps {
   messages: ChatMessage[];
@@ -73,14 +83,17 @@ interface ChatViewProps {
   onOpenDeviceHub?: () => void;
   onPreviewFile: (file: MeshFileItem) => void;
   onAskAboutFile: (file: MeshFileItem) => void;
+  onAskAboutMap?: (item: MapCardItem) => void;
+  onPreviewFiveCards?: () => void;
   onShowToast: (msg: string) => void;
 }
 
 const SANDBOX_QUICK_STARTERS = [
+  '我想去上海外滩，查一下高德地图路线',
   '推送今天的 AI 论文简报',
   '提醒我今晚 9 点复盘周报',
   '读取电脑最新周报文件',
-  '开启手机专注静音',
+  '准备在电脑整理下载目录',
 ];
 
 const TEXT_FILE_REGEX =
@@ -112,22 +125,22 @@ function readFileAsText(file: File): Promise<string> {
 }
 
 /**
- * Compresses large mobile photos to <=1280px JPEG so uploads over mobile Tailscale
- * complete reliably and quickly without hitting reverse-proxy payload size limits.
+ * Compresses mobile photos to <=1024px JPEG (~70-150KB) so uploads over Cloudflare Tunnel
+ * and multimodal vision inference complete reliably without hitting proxy size or timeout limits.
  */
 async function compressImageIfNeeded(
   file: File,
   rawDataUrl: string
 ): Promise<{ dataUrl: string; mimeType: string; approxBytes: number }> {
   const mime = file.type || 'image/jpeg';
-  if (file.size <= 320_000 && mime !== 'image/bmp') {
+  if (file.size <= 160_000 && (mime === 'image/jpeg' || mime === 'image/webp')) {
     return { dataUrl: rawDataUrl, mimeType: mime, approxBytes: file.size };
   }
 
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => {
-      const maxDim = 1280;
+      const maxDim = 1024;
       let { width, height } = img;
       if (width > maxDim || height > maxDim) {
         const scale = Math.min(maxDim / width, maxDim / height);
@@ -144,7 +157,13 @@ async function compressImageIfNeeded(
       }
       ctx.drawImage(img, 0, 0, width, height);
       const outMime = 'image/jpeg';
-      const compressed = canvas.toDataURL(outMime, 0.8);
+      let quality = 0.74;
+      let compressed = canvas.toDataURL(outMime, quality);
+      // If still > 260KB base64, step down quality slightly for fast mobile tunnel upload
+      if (compressed.length > 350_000) {
+        quality = 0.62;
+        compressed = canvas.toDataURL(outMime, quality);
+      }
       const commaIdx = compressed.indexOf(',');
       const b64Len = commaIdx >= 0 ? compressed.length - commaIdx - 1 : compressed.length;
       resolve({
@@ -227,10 +246,27 @@ export const ChatView: React.FC<ChatViewProps> = ({
   onOpenDeviceHub,
   onPreviewFile,
   onAskAboutFile,
+  onAskAboutMap,
+  onPreviewFiveCards,
   onShowToast,
 }) => {
   const [deviceMenuOpen, setDeviceMenuOpen] = useState(false);
+  const [cardMenuOpen, setCardMenuOpen] = useState(false);
+  const [pendingCardTrigger, setPendingCardTrigger] = useState<CardQuickTrigger | null>(null);
   const [capturingCap, setCapturingCap] = useState<DeviceCapabilityKey | null>(null);
+
+  const handleSelectCardTrigger = (trigger: CardQuickTrigger) => {
+    setCardMenuOpen(false);
+    setPendingCardTrigger(trigger);
+    setInput((prev) => (prev.trim() ? prev : trigger.promptPrefix));
+    textareaRef.current?.focus();
+  };
+
+  const handleTeachCardProtocol = () => {
+    setCardMenuOpen(false);
+    onSendMessage(RELAY_CARDS_PROTOCOL_PROMPT);
+    onShowToast('已将 5 种交互卡片协议发给云端助理');
+  };
 
   const handleInjectDeviceContext = async (cap: DeviceCapabilityKey) => {
     setCapturingCap(cap);
@@ -371,15 +407,21 @@ export const ChatView: React.FC<ChatViewProps> = ({
       return;
     }
 
-    onSendMessage(
+    const rawBody =
       trimmed ||
-        (attachments.some((a) => a.mimeType.startsWith('image/'))
-          ? '请查看这张图片'
-          : '请查看这些附件'),
-      attachments.length > 0 ? attachments : undefined
-    );
+      (attachments.some((a) => a.mimeType.startsWith('image/'))
+        ? '请查看这张图片'
+        : '请查看这些附件');
+
+    const finalPayload =
+      pendingCardTrigger && config.mode !== 'sandbox'
+        ? `${rawBody}\n\n[卡片格式提示] ${pendingCardTrigger.protocolHint}`
+        : rawBody;
+
+    onSendMessage(finalPayload, attachments.length > 0 ? attachments : undefined);
     setInput('');
     setAttachments([]);
+    setPendingCardTrigger(null);
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
@@ -653,6 +695,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                                 onExecuteDeviceAction={onExecuteDeviceAction}
                                 onPreviewFile={onPreviewFile}
                                 onAskAboutFile={onAskAboutFile}
+                                onAskAboutMap={onAskAboutMap}
                               />
                             ))}
                           </div>
@@ -754,6 +797,104 @@ export const ChatView: React.FC<ChatViewProps> = ({
             </div>
           )}
 
+          {/* Active Card Mode Chip (when user picked one of the 5 interactive cards) */}
+          {pendingCardTrigger && (
+            <div className="mb-2 flex items-center gap-2">
+              <div
+                style={{ '--tile-tint': pendingCardTrigger.tint } as React.CSSProperties}
+                className="mini-tile inline-flex items-center gap-2 rounded-xl px-2.5 py-1 text-[11px] font-medium text-[var(--relay-text)]"
+              >
+                <LayoutGrid className="h-3.5 w-3.5 text-[var(--accent-sky)]" />
+                <span>期望返回：{pendingCardTrigger.label}交互卡片</span>
+                <button
+                  type="button"
+                  onClick={() => setPendingCardTrigger(null)}
+                  aria-label="取消卡片模式"
+                  className="ml-0.5 rounded-md p-0.5 text-[var(--relay-text-muted)] hover:bg-white/15 hover:text-[var(--relay-text)]"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* 5 Interactive Cards Quick Drawer */}
+          <AnimatePresence>
+            {cardMenuOpen && (
+              <motion.div
+                initial={{ opacity: 0, y: 10, scale: 0.97 }}
+                animate={{ opacity: 1, y: 0, scale: 1 }}
+                exit={{ opacity: 0, y: 8, scale: 0.97 }}
+                transition={{ duration: 0.16 }}
+                className="mac-card absolute bottom-full left-0 right-0 mb-2.5 overflow-hidden rounded-3xl p-3.5 shadow-xl"
+              >
+                <div className="mb-2.5 flex flex-wrap items-center justify-between gap-2 px-0.5">
+                  <span className="text-[11px] font-semibold text-[var(--relay-text-muted)]">
+                    5 种交互卡片（含高德地图）
+                  </span>
+                  <div className="flex items-center gap-2">
+                    {onPreviewFiveCards && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCardMenuOpen(false);
+                          onPreviewFiveCards();
+                        }}
+                        className="inline-flex items-center gap-1 rounded-lg border border-white/15 bg-white/6 px-2 py-1 text-[11px] font-medium text-[var(--relay-text)] hover:bg-white/12"
+                      >
+                        <Sparkles className="h-3 w-3 text-[var(--accent-sky)]" />
+                        <span>预览全部 5 张</span>
+                      </button>
+                    )}
+                    {config.mode !== 'sandbox' && (
+                      <button
+                        type="button"
+                        onClick={handleTeachCardProtocol}
+                        className="inline-flex items-center gap-1 rounded-lg bg-blue-500/85 px-2.5 py-1 text-[11px] font-medium text-white hover:bg-blue-500"
+                      >
+                        <Send className="h-3 w-3" />
+                        <span>发给助理记住协议</span>
+                      </button>
+                    )}
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                  {INTERACTIVE_CARD_TRIGGERS.map((trigger) => {
+                    const CardIcon =
+                      trigger.key === 'map'
+                        ? MapPin
+                        : trigger.key === 'briefing'
+                          ? FileText
+                          : trigger.key === 'reminder'
+                            ? Calendar
+                            : trigger.key === 'file'
+                              ? Paperclip
+                              : Terminal;
+                    return (
+                      <button
+                        key={trigger.key}
+                        type="button"
+                        onClick={() => handleSelectCardTrigger(trigger)}
+                        style={{ '--tile-tint': trigger.tint } as React.CSSProperties}
+                        className="mini-tile flex min-h-[62px] flex-col items-start justify-between rounded-2xl p-2.5 text-left transition-transform active:scale-95"
+                      >
+                        <CardIcon className="h-4 w-4 text-[var(--relay-text)]" />
+                        <div className="mt-1.5">
+                          <div className="text-xs font-semibold text-[var(--relay-text)]">
+                            {trigger.label}
+                          </div>
+                          <div className="text-[10px] text-[var(--relay-text-muted)]">
+                            {trigger.shortHint}
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
           {/* Phone Context Quick-Inject Popover (Today-inspired) */}
           <AnimatePresence>
             {deviceMenuOpen && (
@@ -762,10 +903,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={{ opacity: 0, y: 8, scale: 0.97 }}
                 transition={{ duration: 0.16 }}
-                className="mac-card absolute bottom-full left-0 right-0 mb-2.5 overflow-hidden rounded-3xl border border-stone-200/90 p-3 shadow-lg dark:border-zinc-800"
+                className="mac-card absolute bottom-full left-0 right-0 mb-2.5 overflow-hidden rounded-3xl p-3 shadow-lg"
               >
                 <div className="mb-2 flex items-center justify-between px-1">
-                  <span className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                  <span className="text-[11px] font-semibold text-[var(--relay-text-muted)]">
                     一键附带手机实时上下文
                   </span>
                   {onOpenDeviceHub && (
@@ -775,7 +916,7 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         setDeviceMenuOpen(false);
                         onOpenDeviceHub();
                       }}
-                      className="text-[11px] font-medium text-[#1B6EF3] hover:underline dark:text-blue-400"
+                      className="text-[11px] font-medium text-[var(--accent-sky)] hover:underline"
                     >
                       管理全部权限 →
                     </button>
@@ -799,10 +940,10 @@ export const ChatView: React.FC<ChatViewProps> = ({
                         type="button"
                         disabled={Boolean(capturingCap)}
                         onClick={() => void handleInjectDeviceContext(cap)}
-                        className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-2xl border border-stone-200/70 bg-white/80 px-2 py-2 text-[11px] font-medium text-zinc-700 transition-colors hover:border-[#1B6EF3]/60 hover:text-[#1B6EF3] disabled:opacity-50 dark:border-zinc-800 dark:bg-[#181A20] dark:text-zinc-200 dark:hover:border-blue-500/60 dark:hover:text-blue-400"
+                        className="flex min-h-[54px] flex-col items-center justify-center gap-1 rounded-2xl border border-white/10 bg-black/30 px-2 py-2 text-[11px] font-medium text-[var(--relay-text)] transition-colors hover:border-white/25 hover:bg-white/10 disabled:opacity-50"
                       >
                         {busy ? (
-                          <Loader2 className="h-4 w-4 animate-spin text-[#1B6EF3]" />
+                          <Loader2 className="h-4 w-4 animate-spin text-[var(--accent-sky)]" />
                         ) : (
                           <Icon className="h-4 w-4" />
                         )}
@@ -832,19 +973,38 @@ export const ChatView: React.FC<ChatViewProps> = ({
               type="button"
               onClick={() => fileInputRef.current?.click()}
               aria-label="上传图片或文件"
-              className="flex h-10 w-9 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-stone-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+              className="flex h-10 w-9 shrink-0 items-center justify-center rounded-full text-zinc-500 transition-colors hover:bg-white/10 hover:text-[var(--relay-text)] dark:text-zinc-400"
             >
               <Paperclip className="h-[18px] w-[18px]" />
             </button>
             <button
               type="button"
-              onClick={() => setDeviceMenuOpen((v) => !v)}
+              onClick={() => {
+                setDeviceMenuOpen(false);
+                setCardMenuOpen((v) => !v);
+              }}
+              aria-label="调用交互卡片"
+              title="5 种交互卡片（高德地图 / 论文简报 / 日程 / 文件 / 审批）"
+              className={`flex h-10 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${
+                cardMenuOpen || pendingCardTrigger
+                  ? 'bg-sky-500/20 text-[var(--accent-sky)]'
+                  : 'text-zinc-500 hover:bg-white/10 hover:text-[var(--relay-text)] dark:text-zinc-400'
+              }`}
+            >
+              <LayoutGrid className="h-[18px] w-[18px]" />
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                setCardMenuOpen(false);
+                setDeviceMenuOpen((v) => !v);
+              }}
               aria-label="附带手机上下文"
               title="附带手机上下文（剪贴板/日程/通知/短信/位置）"
               className={`flex h-10 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${
                 deviceMenuOpen
-                  ? 'bg-blue-50 text-[#1B6EF3] dark:bg-blue-950/60 dark:text-blue-400'
-                  : 'text-zinc-500 hover:bg-stone-100 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100'
+                  ? 'bg-blue-500/20 text-[var(--accent-sky)]'
+                  : 'text-zinc-500 hover:bg-white/10 hover:text-[var(--relay-text)] dark:text-zinc-400'
               }`}
             >
               <Smartphone className="h-[18px] w-[18px]" />

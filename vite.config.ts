@@ -20,7 +20,7 @@ export default defineConfig(() => {
           id: APP_BASE,
           name: 'Relay — 私人 Agent 交互中枢',
           short_name: 'Relay',
-          description: '连接 Tailscale 个人设备网与 DeepSeek Harness 的移动端私人 Agent 控制台。',
+          description: '通过 Cloudflare Tunnel 连接云端 DeepSeek Harness 与 Tailscale 电脑设备网的私人 Agent 控制台。',
           theme_color: '#0F172A',
           background_color: '#F6F7F9',
           display: 'standalone',
@@ -51,6 +51,7 @@ export default defineConfig(() => {
           skipWaiting: true,
           clientsClaim: true,
           cleanupOutdatedCaches: true,
+          maximumFileSizeToCacheInBytes: 5 * 1024 * 1024,
           globPatterns: ['**/*.{js,css,html,ico,png,svg,woff,woff2,jpg}'],
           runtimeCaching: [
             {

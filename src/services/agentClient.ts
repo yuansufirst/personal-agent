@@ -12,6 +12,13 @@ import {
   type StreamDshOptions,
 } from './dshMuxClient';
 
+import {
+  extractRelayCards,
+  RELAY_CARDS_PROTOCOL_PROMPT,
+} from './cardProtocol';
+
+export { extractRelayCards };
+
 export interface AgentReplyChunk {
   text: string;
   cards?: InteractiveCard[];
@@ -21,62 +28,6 @@ export interface AgentReplyChunk {
   done?: boolean;
 }
 
-/**
- * Parses ```relay-card ... ``` JSON blocks returned by a live DeepSeek Harness
- * or OpenAI-compatible agent so custom server responses render native interactive cards.
- */
-export function extractRelayCards(rawText: string): {
-  cleanText: string;
-  cards: InteractiveCard[];
-} {
-  const cards: InteractiveCard[] = [];
-  const cardRegex = /```relay-card\s*([\s\S]*?)```/g;
-  let match: RegExpExecArray | null;
-
-  while ((match = cardRegex.exec(rawText)) !== null) {
-    try {
-      const parsed = JSON.parse(match[1].trim());
-      if (parsed && typeof parsed === 'object' && parsed.type && parsed.data) {
-        cards.push(parsed as InteractiveCard);
-      }
-    } catch {
-      // Ignore partial JSON while streaming
-    }
-  }
-
-  const actionRegex = /```relay-action\s*([\s\S]*?)```/g;
-  let actionIdx = 0;
-  while ((match = actionRegex.exec(rawText)) !== null) {
-    try {
-      const parsed = JSON.parse(match[1].trim());
-      if (parsed && typeof parsed === 'object' && typeof parsed.action === 'string') {
-        cards.push({
-          type: 'device-action',
-          data: {
-            id: `dev-act-${actionIdx++}-${parsed.action}`,
-            action: parsed.action,
-            title: String(parsed.title || '手机设备操作'),
-            summary: String(parsed.summary || ''),
-            params:
-              parsed.params && typeof parsed.params === 'object'
-                ? (parsed.params as Record<string, unknown>)
-                : {},
-            status: 'pending',
-          },
-        });
-      }
-    } catch {
-      // Ignore partial JSON while streaming
-    }
-  }
-
-  const cleanText = rawText
-    .replace(cardRegex, '')
-    .replace(actionRegex, '')
-    .trim();
-  return { cleanText, cards };
-}
-
 export async function testServerConnection(
   config: ConnectionConfig
 ): Promise<{ ok: boolean; latencyMs: number; message: string; rawFrame?: string }> {
@@ -84,7 +35,7 @@ export async function testServerConnection(
     return {
       ok: true,
       latencyMs: 12,
-      message: '本地交互体验模式已就绪，可随时切换为 Tailscale 真实服务器地址。',
+      message: '本地交互体验模式已就绪，可随时切换为 Cloudflare Tunnel 云端域名。',
     };
   }
 
@@ -94,7 +45,7 @@ export async function testServerConnection(
 
   const base = config.serverUrl.replace(/\/$/, '');
   if (!base) {
-    return { ok: false, latencyMs: 0, message: '请先填写服务器地址（支持 Tailscale IP 或 MagicDNS）。' };
+    return { ok: false, latencyMs: 0, message: '请先填写服务器地址（支持 Cloudflare Tunnel 自定义 HTTPS 域名）。' };
   }
 
   const started = performance.now();
@@ -108,7 +59,7 @@ export async function testServerConnection(
     const res = await fetch(testUrl, {
       method: 'GET',
       headers,
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(8000),
     });
     const latencyMs = Math.round(performance.now() - started);
 
@@ -122,7 +73,7 @@ export async function testServerConnection(
     return {
       ok: false,
       latencyMs,
-      message: `服务器已响应 HTTP ${res.status}，请检查鉴权 Token 或路径配置。`,
+      message: `服务器已响应 HTTP ${res.status}，请检查鉴权 Token、Cloudflare Access 或路径配置。`,
     };
   } catch (err) {
     const latencyMs = Math.round(performance.now() - started);
@@ -130,7 +81,7 @@ export async function testServerConnection(
     return {
       ok: false,
       latencyMs,
-      message: `无法直连目标地址（${reason}）。若通过 Tailscale 访问，请确认手机已开启 Tailscale 且服务端开启了 CORS 或 Tailscale Serve HTTPS。`,
+      message: `无法直连目标地址（${reason}）。请确认 Cloudflare Tunnel 域名解析正常且源站已放行 CORS。`,
     };
   }
 }
@@ -175,6 +126,62 @@ function buildSandboxResponse(prompt: string): {
   const lower = prompt.toLowerCase();
   const idSuffix = Date.now().toString(36);
 
+  if (
+    lower.includes('地图') ||
+    lower.includes('想去') ||
+    lower.includes('怎么去') ||
+    lower.includes('路线') ||
+    lower.includes('导航') ||
+    lower.includes('/map')
+  ) {
+    const destName =
+      prompt
+        .replace(/^\/map\s*/i, '')
+        .replace(/^(我想去|帮我查|怎么去|导航到|去)\s*/i, '')
+        .replace(/[？?。！!].*$/, '')
+        .trim() || '上海外滩 · 观景平台';
+
+    return {
+      text: `已结合高德地图为你规划前往「${destName}」的位置与路线概览。你可以在下方地图卡片中直接缩放查看周边路网，或一键唤起高德 App 导航。`,
+      cards: [
+        {
+          type: 'map',
+          data: {
+            id: `map-gen-${idSuffix}`,
+            title: destName,
+            address: '上海市黄浦区中山东一路（高德 GCJ-02 示例坐标）',
+            lat: 31.2397,
+            lng: 121.4906,
+            zoom: 14,
+            coordSystem: 'gcj02',
+            origin: {
+              label: '人民广场地铁站',
+              lat: 31.2328,
+              lng: 121.4754,
+            },
+            waypoints: [
+              {
+                label: '南京东路站 2 号口',
+                lat: 31.2381,
+                lng: 121.4846,
+                kind: 'stop',
+                note: '步行约 7 分钟直达',
+              },
+            ],
+            travelMode: 'transit',
+            distanceText: '2.1 km',
+            durationText: '14 分钟',
+            routeSummary: '地铁 2 号线（1 站）→ 南京东路站 2 号口步行 550m',
+            overview:
+              '沿南京东路向东直达目的地，全程路网清晰且换乘少；接入云端真实高德 MCP 后，将实时返回你的真实出发地、高德 POI 经纬度与实时路况。',
+            highlights: ['高德 GCJ-02 坐标', '地铁直达', '支持一键唤起高德 App'],
+            openHours: '全天开放',
+          },
+        },
+      ],
+    };
+  }
+
   if (lower.includes('论文') || lower.includes('paper') || lower.includes('/digest') || lower.includes('新闻')) {
     return {
       text: '已为你检索今天最新的研究与科技动态，整理成交互卡片。你可以直接展开核心要点，或点击收藏归档到简报页。',
@@ -185,7 +192,7 @@ function buildSandboxResponse(prompt: string): {
             id: `brief-gen-${idSuffix}`,
             kind: lower.includes('新闻') ? 'news' : 'paper',
             title: lower.includes('新闻')
-              ? '午间科技雷达：端侧 Android Agent 与轻量文件同步进展'
+              ? '午间科技雷达：Cloudflare Tunnel 移动端直连与端侧 Agent 进展'
               : 'Adaptive Context Routing for Multi-Device Personal Assistants',
             source: lower.includes('新闻') ? '科技日报汇总' : 'arXiv cs.CL',
             identifier: lower.includes('新闻') ? '即时抓取 · 4 条' : 'arXiv:2611.05104',
@@ -195,13 +202,13 @@ function buildSandboxResponse(prompt: string): {
               ? BRIEFING_IMAGES.newsDesk
               : BRIEFING_IMAGES.paperSystems,
             summary: lower.includes('新闻')
-              ? '汇总过去 6 小时高关注动态：轻量级 WebSocket 多路复用协议降低移动端断线重连耗时；主流 Android 自动化框架新增剪贴板隐私白名单。'
+              ? '汇总过去 6 小时高关注动态：手机通过 Cloudflare Tunnel 免 VPN 直连云端 Agent，结合云端到 PC 的 Tailscale 内网实现三端低功耗协同。'
               : '针对手机、PC 与云服务器三端协同场景，提出按设备算力与网络延迟自动切分上下文的路由策略，端到端响应速度提升 37%。',
             takeaways: [
-              '将高频轻指令（提醒、静音、查剪贴板）在边缘节点快速闭环，长文档分析路由至云端模型。',
+              '手机端经 Cloudflare Tunnel 轻量接入，无需常驻 VPN；电脑端由云端经 Tailscale 安全联动。',
               '卡片化结构输出使移动端阅读效率提升 2.1 倍，减少长段落翻屏。',
             ],
-            relevanceNote: '与你当前的 Tailscale 三端协同高度契合，可作为下一版路由优化参考。',
+            relevanceNote: '与你当前的 Cloudflare Tunnel（手机）+ Tailscale（电脑）混合架构高度契合。',
             saved: false,
             url: 'https://arxiv.org/abs/2611.05104',
           },
@@ -229,7 +236,7 @@ function buildSandboxResponse(prompt: string): {
             priority: lower.includes('重要') || lower.includes('紧急') ? 'high' : 'normal',
             channel: 'ntfy',
             completed: false,
-            note: '由对话中枢自动创建，可点击卡片同步至日程表。',
+            note: '由对话中枢自动创建，可点击卡片同步至目标提醒。',
           },
         },
       ],
@@ -238,7 +245,7 @@ function buildSandboxResponse(prompt: string): {
 
   if (lower.includes('文件') || lower.includes('传输') || lower.includes('读取') || lower.includes('/files')) {
     return {
-      text: '已扫描 Tailscale 设备网上的个人电脑工作目录，找到目标文件并准备好传输通道。点击下方卡片可直接预览内容或继续追问。',
+      text: '已通过云端经 Tailscale 扫描个人电脑工作目录，找到目标文件并准备好传输通道。点击下方卡片可直接预览内容或继续追问。',
       cards: [
         {
           type: 'file',
@@ -268,14 +275,16 @@ function buildSandboxResponse(prompt: string): {
           type: 'approval',
           data: {
             id: `appr-gen-${idSuffix}`,
-            title: isAndroid ? '触发 Android 本地自动化动作' : '在个人电脑执行远程工作流',
+            title: isAndroid ? '触发 Android 本地原生动作' : '经 Tailscale 在个人电脑执行远程工作流',
             targetDevice: isAndroid
-              ? '主力手机 Android (100.64.0.35)'
-              : '个人工作站 PC (100.64.0.21)',
+              ? '主力手机 Android (本地执行)'
+              : '个人工作站 PC (Tailscale 100.64.0.21)',
             commandPreview: isAndroid
-              ? 'termux-volume ring 0 && termux-toast "Relay：已开启专注静音"'
+              ? 'android-dnd enable --duration 90m'
               : prompt.startsWith('/') ? prompt : 'pwsh -Command "Get-Clipboard | Out-File ~/relay_clip.txt"',
-            impactNote: '仅影响目标设备的当前状态或指定工作目录，全程经 Tailscale 加密通道传输。',
+            impactNote: isAndroid
+              ? '仅调整本机专注状态，直接由手机原生能力执行。'
+              : '仅影响个人电脑指定工作目录，确认后由云端经 Tailscale 加密通道下发。',
             status: 'pending',
           },
         },
@@ -284,7 +293,7 @@ function buildSandboxResponse(prompt: string): {
   }
 
   return {
-    text: `收到你的指令：“${prompt}”。\n\n当前处于本地交互体验模式——你可以直接试试发送：\n1. 「帮我推送今天的 AI 论文和科技新闻」\n2. 「提醒我明天上午 9 点发周报」\n3. 「读取我电脑上的最新周报文件」\n4. 「帮我把手机调成专注静音」\n\n点击右上角「连接配置」填入你的 Tailscale 服务器地址或 DeepSeek Harness 桥接通道后，所有对话与卡片都会实时直连你的真实 Agent。`,
+    text: `收到你的指令：“${prompt}”。\n\n当前处于本地交互体验模式——你可以点击输入框左侧的「交互卡片」图标，直接体验全部 5 种卡片（高德地图、论文简报、日程提醒、电脑文件、指令审批）。\n\n在设置中填入你的 Cloudflare Tunnel 云端域名后，所有对话与卡片都会实时直连你的真实 Agent。`,
     cards: [],
   };
 }
@@ -356,8 +365,7 @@ export async function streamAgentReply(
     const apiMessages = [
       {
         role: 'system',
-        content:
-          'You are a personal agent connected to Relay mobile hub over Tailscale. When returning structured briefings, reminders, file transfers, or command approvals, you may optionally append a ```relay-card JSON block.',
+        content: `You are a personal agent connected to Relay mobile hub via Cloudflare Tunnel (and connected to the user's PC via Tailscale). ${RELAY_CARDS_PROTOCOL_PROMPT}`,
       },
       ...priorHistory,
       { role: 'user', content: userContent },

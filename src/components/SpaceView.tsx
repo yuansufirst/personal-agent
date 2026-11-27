@@ -136,19 +136,21 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
         />
       ) : subTab === 'environment' ? (
         <div className="space-y-5">
-          {/* Active Agent Endpoint Tile */}
+          {/* Active Agent Endpoint Tile (Cloudflare Tunnel) */}
           <div
             className="mini-tile flex flex-col gap-3 rounded-[22px] p-4 sm:flex-row sm:items-center sm:justify-between"
             style={{ '--tile-tint': 'var(--tint-blue)' } as React.CSSProperties}
           >
             <div className="min-w-0">
-              <div className="text-[11px] font-medium text-[var(--relay-text-muted)]">
-                云端 Agent 通道
+              <div className="flex flex-wrap items-center gap-2 text-[11px] font-medium text-[var(--relay-text-muted)]">
+                <span>手机 → 云端入口 · Cloudflare Tunnel</span>
+                <span className="text-white/25">·</span>
+                <span className="text-[var(--accent-sky)]">电脑互联 · Tailscale</span>
               </div>
               <div className="mt-1 truncate font-mono-tabular text-sm font-semibold text-[var(--relay-text)]">
                 {config.mode === 'sandbox'
                   ? '本地体验模式'
-                  : config.serverUrl || '未配置服务器'}
+                  : config.serverUrl || '未配置 Cloudflare Tunnel 域名'}
               </div>
             </div>
             <button
@@ -161,7 +163,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
             </button>
           </div>
 
-          {/* Mesh Node Magnetic Tiles */}
+          {/* Hybrid Node Magnetic Tiles */}
           <div
             className="grid grid-cols-2 sm:grid-cols-3"
             style={{ gap: 'var(--relay-gap)' }}
@@ -181,6 +183,19 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                     : 'var(--tint-emerald)';
               const nodeAngles = ['162deg', '184deg', '172deg'];
               const isEditing = editingNodeId === node.id;
+              const transportLabel =
+                node.role === 'pc'
+                  ? 'Tailscale 内网'
+                  : node.role === 'cloud'
+                    ? 'CF Tunnel + Tailscale'
+                    : 'Cloudflare Tunnel';
+              const canEditAddress = node.role === 'pc' || node.role === 'cloud';
+              const displayAddress =
+                node.role === 'cloud' && config.serverUrl
+                  ? config.serverUrl.replace(/^https?:\/\//i, '')
+                  : node.role === 'android'
+                    ? '免 Tailscale · 域名直连'
+                    : node.tailscaleIp;
 
               return (
                 <div
@@ -197,7 +212,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                     <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/10 text-[var(--relay-text)]">
                       <Icon className="h-4 w-4" />
                     </div>
-                    {!isEditing && (
+                    {!isEditing && canEditAddress && (
                       <button
                         type="button"
                         onClick={() => startEdit(node)}
@@ -212,6 +227,9 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                   <div>
                     <div className="text-sm font-semibold text-[var(--relay-text)]">
                       {node.name}
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-[var(--accent-sky)]">
+                      {transportLabel}
                     </div>
                     <div className="mt-0.5 text-[11px] text-[var(--relay-text-muted)]">
                       {node.os}
@@ -238,7 +256,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                     </div>
                   ) : (
                     <div className="truncate font-mono-tabular text-xs text-[var(--relay-text-muted)]">
-                      {node.tailscaleIp}
+                      {displayAddress}
                     </div>
                   )}
                 </div>

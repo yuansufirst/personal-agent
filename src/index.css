@@ -531,6 +531,36 @@
   background: rgba(255, 255, 255, 0.16);
 }
 
+/* Dark-mode Amap (高德地图) tile styling inside InteractiveMapCard */
+.relay-amap-container {
+  background: #0d121b;
+  z-index: 1;
+}
+
+.dark .relay-amap-container .leaflet-tile-pane {
+  filter: invert(94%) hue-rotate(186deg) brightness(90%) contrast(94%) saturate(80%);
+}
+
+.relay-amap-container .leaflet-tooltip {
+  background: rgba(10, 13, 20, 0.88);
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  color: #f3f6fb;
+  border-radius: 10px;
+  padding: 4px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.45);
+}
+
+.relay-amap-container .leaflet-tooltip-top::before {
+  border-top-color: rgba(10, 13, 20, 0.88);
+}
+
+.relay-amap-pin {
+  background: transparent;
+  border: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;

@@ -39,6 +39,7 @@ import type {
   HealthConfig,
   HealthDailyLog,
   InteractiveCard,
+  MapCardItem,
   MeshFileItem,
   MeshNode,
   QuickMacro,
@@ -48,6 +49,7 @@ import type {
   TabKey,
 } from './types/relay';
 import { streamAgentReply } from './services/agentClient';
+import { buildFiveCardsShowcase } from './services/cardProtocol';
 import {
   listDshSessions,
   loadDshSessionHistory,
@@ -239,9 +241,24 @@ export default function App() {
     loadFromStorage(STORAGE_KEYS.reminders, [])
   );
 
-  const [nodes, setNodes] = useState<MeshNode[]>(() =>
-    loadFromStorage(STORAGE_KEYS.nodes, INITIAL_MESH_NODES)
-  );
+  const [nodes, setNodes] = useState<MeshNode[]>(() => {
+    const saved = loadFromStorage<MeshNode[] | null>(STORAGE_KEYS.nodes, null);
+    if (!saved || saved.length === 0) return INITIAL_MESH_NODES;
+    const savedPc = saved.find((n) => n.id === 'node-pc' || n.role === 'pc');
+    const needsMigration = saved.some(
+      (n) =>
+        !n.transport ||
+        (n.role === 'android' && /^100\./.test(n.tailscaleIp)) ||
+        (n.role === 'cloud' && /Tailscale HTTPS/i.test(n.activeService))
+    );
+    if (!needsMigration) return saved;
+    return INITIAL_MESH_NODES.map((base) => {
+      if (base.role === 'pc' && savedPc?.tailscaleIp) {
+        return { ...base, tailscaleIp: savedPc.tailscaleIp };
+      }
+      return base;
+    });
+  });
 
   const [files, setFiles] = useState<MeshFileItem[]>([]);
 
@@ -980,6 +997,9 @@ export default function App() {
         (c): c is Extract<InteractiveCard, { type: 'approval' }> =>
           c.type === 'approval' && c.data.id === actionId
       );
+    const isPcTarget = Boolean(
+      action?.data.targetDevice && /pc|电脑|workstation|mac|windows/i.test(action.data.targetDevice)
+    );
     updateSessionMessages(activeSession.id, (prev) =>
       prev.map((m) => ({
         ...m,
@@ -992,7 +1012,9 @@ export default function App() {
                   status: decision,
                   resultOutput:
                     decision === 'approved'
-                      ? '指令已通过 Tailscale 下发并执行成功'
+                      ? isPcTarget
+                        ? '指令已通过云端 → Tailscale 下发至电脑执行'
+                        : '指令已通过 Cloudflare Tunnel 下发执行'
                       : undefined,
                 },
               }
@@ -1000,10 +1022,18 @@ export default function App() {
         ),
       }))
     );
-    showToast(decision === 'approved' ? '已批准并通过 Tailscale 下发执行' : '已拒绝该操作');
+    showToast(
+      decision === 'approved'
+        ? isPcTarget
+          ? '已批准并通过云端 → Tailscale 下发至电脑'
+          : '已批准并通过 Cloudflare Tunnel 下发执行'
+        : '已拒绝该操作'
+    );
     if (decision === 'approved' && action) {
       void handleSendMessage(
-        `已批准执行：${action.data.targetDevice} · ${action.data.commandPreview}。请在云端确认并执行，完成后把结果告诉我。`
+        `已批准执行：${action.data.targetDevice} · ${action.data.commandPreview}。请在云端确认${
+          isPcTarget ? '并通过 Tailscale 下发给电脑' : ''
+        }执行，完成后把结果告诉我。`
       );
     }
   };
@@ -1114,6 +1144,27 @@ export default function App() {
     setPreviewFile(null);
     setActiveTab('chat');
     void handleSendMessage(`请读取并总结设备网文件「${file.name}」（路径：${file.path}）的核心内容。`);
+  };
+
+  const handleAskAboutMap = (item: MapCardItem) => {
+    setActiveTab('chat');
+    void handleSendMessage(
+      `关于「${item.title}」（${item.address}），请通过高德地图帮我补充备选路线、当前路况或周边推荐，并用 \`relay-card\` (type: "map") 返回更新后的高德地图交互卡片。`
+    );
+  };
+
+  const handlePreviewFiveCards = () => {
+    setActiveTab('chat');
+    const previewMsg: ChatMessage = {
+      id: `cards-preview-${Date.now()}`,
+      role: 'assistant',
+      timestamp: nowTimeString(),
+      content:
+        '已为你展开全部 5 种交互卡片（高德地图 · 论文简报 · 日程提醒 · 设备文件 · 电脑审批），所有按钮均可以直接点击交互。若想让云端助理在真实对话里自动返回这些卡片，可在卡片面板点「发给助理记住协议」。',
+      cards: buildFiveCardsShowcase(),
+    };
+    updateSessionMessages(activeSession.id, (prev) => [...prev, previewMsg]);
+    showToast('已展示全部 5 种交互卡片');
   };
 
   const pendingGoalsOrReminders =
@@ -1607,6 +1658,8 @@ export default function App() {
                     setActiveTab('space');
                   }}
                   onAskAboutFile={handleAskAboutFile}
+                  onAskAboutMap={handleAskAboutMap}
+                  onPreviewFiveCards={handlePreviewFiveCards}
                   onShowToast={showToast}
                 />
               </div>
@@ -1743,6 +1796,10 @@ export default function App() {
         open={connectionOpen}
         config={config}
         onClose={() => setConnectionOpen(false)}
+        onSendProtocolToAgent={(promptText) => {
+          setActiveTab('chat');
+          void handleSendMessage(promptText);
+        }}
         onSave={(next) => {
           resetDshSession(config);
           setConfig(next);

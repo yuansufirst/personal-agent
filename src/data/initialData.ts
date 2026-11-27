@@ -16,14 +16,14 @@ export const BRIEFING_IMAGES = {
 
 export const DEFAULT_CONNECTION_CONFIG: ConnectionConfig = {
   mode: 'dsh-bridge',
-  serverUrl: 'https://izn4adpsp65vta6oli1hhcz.tail6e132f.ts.net/agent',
+  serverUrl: '',
   wsEndpoint: '/api/remote.mux',
   token: '',
   model: 'deepseek-reasoner',
   workspace: '9000111a-7d73-453e-b69d-16d9b271a9f3',
   rpcMethod: 'session/prompt',
   sessionId: '',
-  ntfyUrl: 'http://100.64.0.10:8085',
+  ntfyUrl: '',
   ntfyTopic: 'relay-reminders',
 };
 
@@ -32,31 +32,34 @@ export const INITIAL_MESH_NODES: MeshNode[] = [
     id: 'node-cloud',
     role: 'cloud',
     name: '云服务器 · DeepSeek Harness',
-    tailscaleIp: 'izn4adpsp65vta6oli1hhcz.tail6e132f.ts.net',
+    tailscaleIp: 'Cloudflare Tunnel · 自定义域名',
+    transport: 'cloudflare-tunnel',
     os: 'Ubuntu 24.04 LTS',
     online: true,
     latencyMs: 28,
-    activeService: 'Tailscale HTTPS · /agent/api/remote.mux',
+    activeService: 'Cloudflare Tunnel (手机) · Tailscale (电脑)',
   },
   {
     id: 'node-pc',
     role: 'pc',
     name: '个人工作站 PC',
     tailscaleIp: '100.64.0.21',
+    transport: 'tailscale',
     os: 'Windows 11 / WSL2',
     online: true,
     latencyMs: 14,
-    activeService: 'Taildrive · SSH · File Bridge',
+    activeService: 'Tailscale 内网 · Taildrive · SSH',
   },
   {
     id: 'node-android',
     role: 'android',
     name: '主力手机 Android',
-    tailscaleIp: '100.64.0.35',
+    tailscaleIp: 'Cloudflare Tunnel 直连（免开 Tailscale）',
+    transport: 'cloudflare-tunnel',
     os: 'Android 15',
     online: true,
-    latencyMs: 9,
-    activeService: 'Termux:API · Local Controller',
+    latencyMs: 18,
+    activeService: '原生系统能力 · HTTPS/WSS 隧道直连',
   },
 ];
 
@@ -206,7 +209,7 @@ export const QUICK_MACROS: QuickMacro[] = [
     label: '拉取 PC 剪贴板',
     targetRole: 'pc',
     command: '/pc clipboard get',
-    description: '读取个人电脑当前剪贴板并同步到手机',
+    description: '经云端 → Tailscale 读取个人电脑剪贴板并同步到手机',
   },
   {
     id: 'macro-2',
@@ -220,23 +223,24 @@ export const QUICK_MACROS: QuickMacro[] = [
     label: '整理电脑下载目录',
     targetRole: 'pc',
     command: '/pc organize ~/Downloads --dry-run',
-    description: '按文档/图片/安装包分类并先生成审批卡片',
+    description: '经 Tailscale 分析电脑下载目录并先生成审批卡片',
   },
   {
     id: 'macro-4',
     label: '手机切换专注静音',
     targetRole: 'android',
     command: '/android dnd enable --duration 90m',
-    description: '通过本地 Android 控制器开启 90 分钟专注模式',
+    description: '直接通过手机本地原生能力开启 90 分钟专注模式',
   },
 ];
 
 export const SLASH_COMMANDS = [
+  { cmd: '/map', hint: '调用高德地图生成地点与路线交互卡片' },
   { cmd: '/digest', hint: '生成今日新闻与论文交互卡片' },
   { cmd: '/remind', hint: '创建一条带推送提醒的日程卡片' },
-  { cmd: '/pc', hint: '向个人电脑派发工作或文件同步任务' },
-  { cmd: '/files', hint: '列出 Tailscale 设备网最近文件' },
-  { cmd: '/android', hint: '触发 Android 手机本地控制动作' },
+  { cmd: '/pc', hint: '经 Tailscale 向个人电脑派发工作或文件同步任务' },
+  { cmd: '/files', hint: '列出个人电脑 (Tailscale) 与云端最近文件' },
+  { cmd: '/android', hint: '触发 Android 手机本地原生动作' },
   { cmd: '/new', hint: '开启新的 DeepSeek Harness 对话会话' },
 ];
 

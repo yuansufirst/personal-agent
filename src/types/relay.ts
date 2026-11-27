@@ -163,6 +163,7 @@ export interface MeshNode {
   role: 'cloud' | 'pc' | 'android';
   name: string;
   tailscaleIp: string;
+  transport?: 'cloudflare-tunnel' | 'tailscale' | 'local';
   os: string;
   online: boolean;
   latencyMs: number;
@@ -177,11 +178,44 @@ export interface QuickMacro {
   description: string;
 }
 
+export interface MapWaypoint {
+  label: string;
+  lat: number;
+  lng: number;
+  kind?: 'origin' | 'destination' | 'stop';
+  note?: string;
+}
+
+export interface MapCardItem {
+  id: string;
+  title: string;
+  address?: string;
+  lat: number;
+  lng: number;
+  zoom?: number;
+  coordSystem?: 'gcj02' | 'wgs84';
+  origin?: {
+    label: string;
+    lat: number;
+    lng: number;
+  };
+  waypoints?: MapWaypoint[];
+  polyline?: [number, number][];
+  travelMode?: 'transit' | 'driving' | 'walking' | 'cycling';
+  distanceText?: string;
+  durationText?: string;
+  routeSummary?: string;
+  overview: string;
+  highlights?: string[];
+  openHours?: string;
+}
+
 export type InteractiveCard =
   | { type: 'briefing'; data: BriefingItem }
   | { type: 'reminder'; data: ReminderItem }
   | { type: 'approval'; data: ApprovalAction }
   | { type: 'file'; data: MeshFileItem }
+  | { type: 'map'; data: MapCardItem }
   | { type: 'device-action'; data: DeviceActionItem };
 
 export interface ChatAttachment {

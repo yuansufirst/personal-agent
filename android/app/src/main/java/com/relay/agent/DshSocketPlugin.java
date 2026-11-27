@@ -17,6 +17,8 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
 import java.io.IOException;
+import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
@@ -35,21 +37,29 @@ import okhttp3.WebSocketListener;
 /**
  * Native OkHttp WebSocket & binary upload bridge for DeepSeek Harness.
  * Bypasses Android WebView's cross-origin / Sec-Fetch-Site: cross-site restrictions
- * while routing seamlessly through Android's Tailscale VPN interface.
+ * and works seamlessly over Cloudflare Tunnel HTTPS/WSS or Tailscale networks.
  */
 @CapacitorPlugin(name = "DshSocket")
 public class DshSocketPlugin extends Plugin {
-    private OkHttpClient client;
+    private OkHttpClient wsClient;
+    private OkHttpClient httpClient;
     private final Map<String, WebSocket> sockets = new ConcurrentHashMap<>();
 
     @Override
     public void load() {
         super.load();
-        client = new OkHttpClient.Builder()
+        wsClient = new OkHttpClient.Builder()
             .connectTimeout(15, TimeUnit.SECONDS)
             .readTimeout(0, TimeUnit.MILLISECONDS)
             .writeTimeout(45, TimeUnit.SECONDS)
             .pingInterval(25, TimeUnit.SECONDS)
+            .retryOnConnectionFailure(true)
+            .build();
+        httpClient = new OkHttpClient.Builder()
+            .connectTimeout(15, TimeUnit.SECONDS)
+            .readTimeout(35, TimeUnit.SECONDS)
+            .writeTimeout(35, TimeUnit.SECONDS)
+            .callTimeout(45, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build();
     }
@@ -70,7 +80,7 @@ public class DshSocketPlugin extends Plugin {
             reqBuilder.header("Origin", origin);
         }
 
-        WebSocket ws = client.newWebSocket(reqBuilder.build(), new WebSocketListener() {
+        WebSocket ws = wsClient.newWebSocket(reqBuilder.build(), new WebSocketListener() {
             @Override
             public void onOpen(@NonNull WebSocket webSocket, @NonNull Response response) {
                 JSObject payload = new JSObject();
@@ -154,6 +164,23 @@ public class DshSocketPlugin extends Plugin {
         call.resolve();
     }
 
+    private static String toAsciiHeaderFilename(String rawName) {
+        String safe = (rawName == null || rawName.isEmpty()) ? "upload.jpg" : rawName;
+        StringBuilder ascii = new StringBuilder();
+        for (int i = 0; i < safe.length(); i++) {
+            char c = safe.charAt(i);
+            if (c >= 0x20 && c <= 0x7E && c != '"' && c != '\\') {
+                ascii.append(c);
+            } else if (c == '.') {
+                ascii.append('.');
+            } else {
+                ascii.append('_');
+            }
+        }
+        String res = ascii.toString().replaceAll("_+", "_").trim();
+        return res.isEmpty() ? "upload.jpg" : res;
+    }
+
     /**
      * Uploads raw binary or multipart file bytes natively via OkHttp so images/files
      * bypass WebView CORS and CapacitorHttp Blob serialization quirks.
@@ -181,6 +208,15 @@ public class DshSocketPlugin extends Plugin {
             return;
         }
 
+        String safeFilename = (filename != null && !filename.isEmpty()) ? filename : "upload.bin";
+        String asciiFilename = toAsciiHeaderFilename(safeFilename);
+        String encodedFilename;
+        try {
+            encodedFilename = URLEncoder.encode(safeFilename, StandardCharsets.UTF_8.name()).replace("+", "%20");
+        } catch (Exception e) {
+            encodedFilename = asciiFilename;
+        }
+
         MediaType mediaType = MediaType.parse(mimeType != null ? mimeType : "application/octet-stream");
         RequestBody body;
         if ("multipart".equals(mode)) {
@@ -188,11 +224,11 @@ public class DshSocketPlugin extends Plugin {
             if (sessionId != null && !sessionId.isEmpty()) {
                 mb.addFormDataPart("sessionId", sessionId);
             }
-            mb.addFormDataPart("filename", filename != null ? filename : "upload.bin");
+            mb.addFormDataPart("filename", safeFilename);
             mb.addFormDataPart("mimeType", mimeType != null ? mimeType : "application/octet-stream");
             mb.addFormDataPart(
                 "file",
-                filename != null ? filename : "upload.bin",
+                asciiFilename,
                 RequestBody.create(bytes, mediaType)
             );
             body = mb.build();
@@ -207,16 +243,17 @@ public class DshSocketPlugin extends Plugin {
             reqBuilder.header("Origin", origin);
         }
         if ("raw".equals(mode)) {
-            if (filename != null && !filename.isEmpty()) {
-                reqBuilder.header("X-File-Name", filename);
-                reqBuilder.header("Content-Disposition", "attachment; filename=\"" + filename.replace("\"", "") + "\"");
-            }
+            reqBuilder.header("X-File-Name", encodedFilename);
+            reqBuilder.header(
+                "Content-Disposition",
+                "attachment; filename=\"" + asciiFilename + "\"; filename*=UTF-8''" + encodedFilename
+            );
             if (sessionId != null && !sessionId.isEmpty()) {
                 reqBuilder.header("X-Session-Id", sessionId);
             }
         }
 
-        client.newCall(reqBuilder.build()).enqueue(new Callback() {
+        httpClient.newCall(reqBuilder.build()).enqueue(new Callback() {
             @Override
             public void onFailure(@NonNull Call httpCall, @NonNull IOException e) {
                 call.reject(e.getMessage() != null ? e.getMessage() : "Upload network error");

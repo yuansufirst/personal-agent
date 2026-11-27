@@ -145,6 +145,41 @@ function findSessionIdInPayload(val: unknown): string | undefined {
   return undefined;
 }
 
+function createTimedAbortController(
+  parentSignal: AbortSignal | undefined,
+  timeoutMs: number
+): { signal: AbortSignal; cleanup: () => void; didTimeout: () => boolean } {
+  const controller = new AbortController();
+  let timedOut = false;
+
+  const onParentAbort = () => {
+    controller.abort(parentSignal?.reason);
+  };
+  if (parentSignal) {
+    if (parentSignal.aborted) {
+      controller.abort(parentSignal.reason);
+    } else {
+      parentSignal.addEventListener('abort', onParentAbort, { once: true });
+    }
+  }
+
+  const timer = window.setTimeout(() => {
+    timedOut = true;
+    controller.abort(new Error(`请求超时（${Math.round(timeoutMs / 1000)}s）`));
+  }, timeoutMs);
+
+  return {
+    signal: controller.signal,
+    didTimeout: () => timedOut,
+    cleanup: () => {
+      window.clearTimeout(timer);
+      if (parentSignal) {
+        parentSignal.removeEventListener('abort', onParentAbort);
+      }
+    },
+  };
+}
+
 /**
  * Calls a Typert Gateway unary Remote method over HTTP POST (never sends Authorization).
  * Automatically discovers whether the host mounts unary routes at `/api/remote/<endpoint>`
@@ -154,7 +189,8 @@ async function callDshHttpUnary(
   config: ConnectionConfig,
   endpoint: string,
   args: Record<string, unknown>,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  timeoutMs = 25000
 ): Promise<unknown> {
   const base = config.serverUrl.trim().replace(/\/+$/, '');
   const cleanEndpoint = endpoint.replace(/^\/+/, '');
@@ -174,23 +210,32 @@ async function callDshHttpUnary(
       payload: { args },
     };
 
+    const timed = createTimedAbortController(signal, timeoutMs);
     let res: Response;
     try {
       res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-        signal,
+        signal: timed.signal,
       });
     } catch (err) {
+      const wasTimeout = timed.didTimeout();
+      timed.cleanup();
+      if (wasTimeout) {
+        throw new Error(
+          `HTTP POST ${cleanEndpoint} 请求超时（${Math.round(timeoutMs / 1000)}s）。若发送了图片，可能是单次请求体过大或 Cloudflare Tunnel 源站响应过慢。`
+        );
+      }
       if ((err as Error).name === 'AbortError') throw err;
       const msg = err instanceof Error ? err.message : String(err);
       throw new Error(
-        `HTTP POST ${url} 无法访问（${msg}）。请确认已连接 Tailscale 且反代允许 CORS。`
+        `HTTP POST ${url} 无法访问（${msg}）。请确认 Cloudflare Tunnel 域名可达且源站允许跨域 CORS。`
       );
     }
 
     const rawText = await res.text();
+    timed.cleanup();
     let parsed: unknown = rawText;
     try {
       parsed = rawText ? JSON.parse(rawText) : null;
@@ -201,6 +246,13 @@ async function callDshHttpUnary(
     if (res.status === 404 || res.status === 405) {
       lastErr = new Error(`HTTP ${res.status} (${url})`);
       continue;
+    }
+
+    if (res.status === 413) {
+      throw new Error(`HTTP 413 请求体超过反代/网关上限（${url}），请尝试发送更小尺寸的图片。`);
+    }
+    if (res.status === 524 || res.status === 504) {
+      throw new Error(`HTTP ${res.status} Cloudflare Tunnel 等待源站响应超时（${url}）。`);
     }
 
     const unwrapEnvelope = (node: unknown): unknown => {
@@ -241,7 +293,7 @@ async function callDshHttpUnary(
 
 /**
  * Probes the corresponding HTTPS URL when a WebSocket handshake fails,
- * distinguishing Tailscale/TUN network blocks from server-side 403/404/502 errors.
+ * distinguishing Cloudflare Tunnel / DNS issues from server-side 403/404/502 errors.
  */
 async function diagnoseWsHandshakeFailure(serverUrl: string, wsUrl: string): Promise<string> {
   const httpWsTarget = wsUrl.replace(/^wss:\/\//i, 'https://').replace(/^ws:\/\//i, 'http://');
@@ -251,7 +303,7 @@ async function diagnoseWsHandshakeFailure(serverUrl: string, wsUrl: string): Pro
     try {
       const res = await fetch(url, {
         method: 'GET',
-        signal: AbortSignal.timeout(5000),
+        signal: AbortSignal.timeout(6000),
       });
       return { reached: true, status: res.status };
     } catch (err) {
@@ -265,15 +317,15 @@ async function diagnoseWsHandshakeFailure(serverUrl: string, wsUrl: string): Pro
   const wsProbe = await probe(httpWsTarget);
   if (wsProbe.reached) {
     if (wsProbe.status === 403) {
-      return `WebSocket 握手被服务端拒绝（HTTPS 探测返回 403 Forbidden）。请检查反代是否为 WebSocket Upgrade 同样改写了 Origin / Sec-Fetch-Site 头。`;
+      return `WebSocket 握手被服务端或 Cloudflare Access 拒绝（HTTPS 探测返回 403 Forbidden）。请检查域名 Access 规则及 Origin / Sec-Fetch-Site 头转发。`;
     }
-    if (wsProbe.status === 502 || wsProbe.status === 503) {
-      return `Tailscale 网络已通，但反代返回 HTTP ${wsProbe.status}（后端 dsh 进程可能未启动或监听端口异常）。`;
+    if (wsProbe.status === 502 || wsProbe.status === 503 || wsProbe.status === 530) {
+      return `Cloudflare Tunnel 边缘已连通，但源站返回 HTTP ${wsProbe.status}（请检查云端 cloudflared 隧道与后端 dsh 进程是否正常运行）。`;
     }
     if (wsProbe.status === 404) {
-      return `Tailscale 网络已通，但 ${httpWsTarget} 返回 404（请检查反代路径与 WebSocket 路径 /api/remote.mux）。`;
+      return `Cloudflare Tunnel 域名已通，但 ${httpWsTarget} 返回 404（请检查反代路径与 WebSocket 路径 /api/remote.mux）。`;
     }
-    return `HTTPS 已可达（${httpWsTarget} 返回 HTTP ${wsProbe.status}），但 WebSocket 升级（Upgrade）失败。请检查服务端反代是否开启 WebSocket 转发（Upgrade / Connection 头）或是否允许跨域 Origin。`;
+    return `HTTPS 已可达（${httpWsTarget} 返回 HTTP ${wsProbe.status}），但 WebSocket 升级（Upgrade）失败。请检查 Cloudflare 面板 WebSockets 开关与源站反代 Upgrade/Connection 头转发。`;
   }
 
   const baseProbe = baseTarget && baseTarget !== httpWsTarget ? await probe(baseTarget) : wsProbe;
@@ -281,7 +333,7 @@ async function diagnoseWsHandshakeFailure(serverUrl: string, wsUrl: string): Pro
     return `根地址可达（HTTP ${baseProbe.status}），但 ${httpWsTarget} 无法访问（${wsProbe.err || 'CORS/网络错误'}）。`;
   }
 
-  return `无法访问 ${baseTarget || httpWsTarget}（${baseProbe.err || 'Failed to fetch'}）。当前设备到 Tailscale 域名的网络不通——请确认 Tailscale 已开启、代理软件 TUN 已关闭或已将 *.ts.net 加入直连，也可先点击上方“浏览器直接打开 HTTPS 测通”验证。`;
+  return `无法访问 ${baseTarget || httpWsTarget}（${baseProbe.err || 'Failed to fetch'}）。请检查 Cloudflare Tunnel 自定义域名解析、HTTPS 证书或当前手机网络状态，也可先点击“浏览器直接打开 HTTPS 测通”验证。`;
 }
 
 /**
@@ -329,7 +381,7 @@ export function testDshWebSocket(
         wsUrl,
         latencyMs: Math.round(performance.now() - started),
         message:
-          'WebSocket 连接超时（15s）。请确认已连接 Tailscale 且代理/TUN 已放行 *.ts.net。',
+          'WebSocket 连接超时（15s）。请确认 Cloudflare Tunnel 域名可达且已开启 WebSockets 转发。',
       });
     }, 15000);
 
@@ -1179,40 +1231,51 @@ function base64ToUint8Array(base64: string): Uint8Array {
 }
 
 /**
- * Uploads an image or binary file to DeepSeek Harness `POST /api/session/uploadFileBinary`
- * and returns its staging `receiptId` for `{ type: 'file', receiptId }` in `session/prompt`.
+ * Uploads an image or binary file to DeepSeek Harness `POST <prefix>/session/uploadFileBinary`
+ * (or unary `session/uploadFile` fallback) with strict per-attempt timeouts so Cloudflare Tunnel
+ * uploads never hang silently.
  */
 async function uploadAttachmentToDsh(
   config: ConnectionConfig,
   sessionId: string,
   att: ChatAttachment,
   signal?: AbortSignal
-): Promise<string | null> {
+): Promise<{ receiptId: string | null; diagnostic?: string }> {
   const base = config.serverUrl.trim().replace(/\/+$/, '');
   const base64Data = extractBase64Payload(att);
-  if (!base || !base64Data) return null;
+  if (!base || !base64Data) return { receiptId: null, diagnostic: '附件数据为空' };
 
   const mimeType = att.mimeType || 'application/octet-stream';
-  const filename = att.name || 'attachment.bin';
+  const filename = att.name || 'attachment.jpg';
   const query = new URLSearchParams({
     sessionId,
     filename,
     mimeType,
   }).toString();
 
-  const candidateUrls = [
-    `${base}/api/session/uploadFileBinary?${query}`,
-    `${base}/api/session/uploadFileBinary`,
-  ];
+  const cachedPrefix = unaryPrefixCache.get(base);
+  const prefixes = cachedPrefix
+    ? [cachedPrefix, cachedPrefix === '/api' ? '/api/remote' : '/api']
+    : ['/api', '/api/remote'];
 
   const modes: Array<'raw' | 'multipart'> = ['raw', 'multipart'];
+  let lastDiag = '';
 
-  for (const url of candidateUrls) {
+  for (const prefix of prefixes) {
+    const urlWithQuery = `${base}${prefix}/session/uploadFileBinary?${query}`;
+    let routeNotFound = false;
+
     for (const mode of modes) {
+      if (signal?.aborted) {
+        const abortErr = new Error('已取消上传');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
+
       try {
-        // 1. Native Android APK path via OkHttp (avoids CapacitorHttp Blob quirks & CORS)
+        // 1. Native Android APK path via OkHttp (dedicated httpClient with finite timeouts & ASCII-encoded headers)
         const nativeRes = await uploadBinaryNativeIfAvailable({
-          url,
+          url: urlWithQuery,
           base64Data,
           mimeType,
           filename,
@@ -1225,43 +1288,55 @@ async function uploadAttachmentToDsh(
             try {
               const parsed = JSON.parse(nativeRes.body);
               const receiptId = findReceiptIdInPayload(parsed);
-              if (receiptId) return receiptId;
+              if (receiptId) {
+                unaryPrefixCache.set(base, prefix);
+                return { receiptId };
+              }
             } catch {
               // ignore non-json
             }
           }
-          if (nativeRes.status === 404) {
-            // Route not mounted on this host; skip trying other mode on same URL
+          lastDiag = `${prefix}/session/uploadFileBinary (${mode}) -> HTTP ${nativeRes.status}`;
+          if (nativeRes.status === 404 || nativeRes.status === 405) {
+            routeNotFound = true;
             break;
+          }
+          if (nativeRes.status === 413) {
+            return { receiptId: null, diagnostic: 'HTTP 413 图片体积超出服务端限制' };
           }
           continue;
         }
 
-        // 2. Standard Web/PWA path via fetch
+        // 2. Standard Web/PWA path via fetch with 18s per-attempt timeout
+        const timed = createTimedAbortController(signal, 18000);
         const bytes = base64ToUint8Array(base64Data);
         let res: Response;
-        if (mode === 'raw') {
-          res = await fetch(url, {
-            method: 'POST',
-            headers: {
-              'Content-Type': mimeType,
-              'X-File-Name': encodeURIComponent(filename),
-              'X-Session-Id': sessionId,
-            },
-            body: bytes as unknown as BodyInit,
-            signal,
-          });
-        } else {
-          const form = new FormData();
-          form.append('sessionId', sessionId);
-          form.append('filename', filename);
-          form.append('mimeType', mimeType);
-          form.append('file', new Blob([bytes as unknown as BlobPart], { type: mimeType }), filename);
-          res = await fetch(url, {
-            method: 'POST',
-            body: form,
-            signal,
-          });
+        try {
+          if (mode === 'raw') {
+            res = await fetch(urlWithQuery, {
+              method: 'POST',
+              headers: {
+                'Content-Type': mimeType,
+                'X-File-Name': encodeURIComponent(filename),
+                'X-Session-Id': sessionId,
+              },
+              body: bytes as unknown as BodyInit,
+              signal: timed.signal,
+            });
+          } else {
+            const form = new FormData();
+            form.append('sessionId', sessionId);
+            form.append('filename', filename);
+            form.append('mimeType', mimeType);
+            form.append('file', new Blob([bytes as unknown as BlobPart], { type: mimeType }), filename);
+            res = await fetch(urlWithQuery, {
+              method: 'POST',
+              body: form,
+              signal: timed.signal,
+            });
+          }
+        } finally {
+          timed.cleanup();
         }
 
         if (res.ok) {
@@ -1269,20 +1344,57 @@ async function uploadAttachmentToDsh(
           try {
             const parsed = JSON.parse(text);
             const receiptId = findReceiptIdInPayload(parsed);
-            if (receiptId) return receiptId;
+            if (receiptId) {
+              unaryPrefixCache.set(base, prefix);
+              return { receiptId };
+            }
           } catch {
             // ignore
           }
         }
-        if (res.status === 404) break;
+        lastDiag = `${prefix}/session/uploadFileBinary (${mode}) -> HTTP ${res.status}`;
+        if (res.status === 404 || res.status === 405) {
+          routeNotFound = true;
+          break;
+        }
+        if (res.status === 413) {
+          return { receiptId: null, diagnostic: 'HTTP 413 图片体积超出服务端限制' };
+        }
       } catch (err) {
-        if ((err as Error).name === 'AbortError') throw err;
-        // Try next upload format
+        if ((err as Error).name === 'AbortError' && signal?.aborted) throw err;
+        lastDiag = `${prefix}/session/uploadFileBinary (${mode}) -> ${err instanceof Error ? err.message : '网络异常'}`;
       }
+    }
+
+    if (!routeNotFound) {
+      // Endpoint exists on this prefix; don't waste time probing alternate prefix
+      break;
     }
   }
 
-  return null;
+  // Fallback: try unary JSON uploadFile RPC if binary upload route was absent or rejected
+  try {
+    const unaryRes = await callDshHttpUnary(
+      config,
+      'session/uploadFile',
+      {
+        request: {
+          sessionId,
+          filename,
+          mimeType,
+          dataBase64: base64Data,
+        },
+      },
+      signal,
+      18000
+    );
+    const receiptId = findReceiptIdInPayload(unaryRes);
+    if (receiptId) return { receiptId };
+  } catch {
+    // Fall back to inline multimodal content in session/prompt
+  }
+
+  return { receiptId: null, diagnostic: lastDiag || '二进制上传接口不可用，已改用内联传输' };
 }
 
 function buildMultimodalContentCandidates(
@@ -1479,12 +1591,18 @@ export function streamDshMuxReply(
       );
     }
 
-    const connectTimer = window.setTimeout(() => {
-      fail(new Error(`连接 ${wsUrl} 超时（15s），请确认设备已连入 Tailscale。`));
-    }, 15000);
+    let connectTimer = 0;
 
+    const mediaAttachments = (options?.attachments || []).filter(
+      (att) => !att.textContent && (att.base64Data || att.dataUrl)
+    );
+    const hasMedia = mediaAttachments.length > 0;
+    let lastUploadDiagnostic = '';
     let idleTimer = window.setTimeout(() => {}, 0);
-    const resetIdleTimer = (ms = 45000) => {
+    let currentIdleMs = hasMedia ? 120000 : 60000;
+
+    const resetIdleTimer = (ms = hasMedia ? 120000 : 60000) => {
+      currentIdleMs = ms;
       window.clearTimeout(idleTimer);
       idleTimer = window.setTimeout(() => {
         if (accumulated) {
@@ -1496,35 +1614,25 @@ export function streamDshMuxReply(
             recentRawFrames.length > 0
               ? ` 期间收到原始帧样本：${recentRawFrames.join(' | ')}`
               : '';
-          fail(new Error(`已提交消息到 DeepSeek Harness，但等待流式回复超时（45s）。${sample}`));
+          const uploadHint = lastUploadDiagnostic ? `（附件状态：${lastUploadDiagnostic}）` : '';
+          fail(
+            new Error(
+              `已提交消息到 DeepSeek Harness，但等待流式回复超时（${Math.round(currentIdleMs / 1000)}s）。${uploadHint}${sample}`
+            )
+          );
         }
       }, ms);
     };
 
-    try {
-      ws = createDshWebSocket(wsUrl);
-    } catch (err) {
-      fail(new Error(`WebSocket 地址无效：${err instanceof Error ? err.message : wsUrl}`));
-      return;
-    }
-
-    ws.onopen = async () => {
-      wsOpened = true;
-      window.clearTimeout(connectTimer);
-      resetIdleTimer(60000);
-      if (!ws) return;
-      mux = new SingleTurnMuxHelper(ws);
-
+    const startTurn = async () => {
       try {
-        // Step 1: Ensure sessionId via HTTP POST unary carrier (NEVER through stream carrier)
+        // Step 1: Ensure sessionId via HTTP POST unary carrier BEFORE opening WS
         const hasExplicitOverride = options?.sessionIdOverride !== undefined;
         let sessionId = hasExplicitOverride
           ? options?.sessionIdOverride?.trim() || ''
           : config.sessionId?.trim() || sessionCache.get(cacheKey) || loadStoredSession(cacheKey) || '';
 
         if (!sessionId) {
-          // Prefer the personal-assistant workspace (AGENTS.md persona/tools);
-          // fall back to the configured workspace id when cwd creation is refused.
           const createRequests: Array<Record<string, unknown>> = [
             { cwd: '/root/.dsh/im' },
             { workspaceId: config.workspace.trim() || undefined },
@@ -1533,19 +1641,13 @@ export function streamDshMuxReply(
           let lastErr = '';
           for (const request of createRequests) {
             try {
-              createRes = await callDshHttpUnary(config, 'session/create', { request }, signal);
+              createRes = await callDshHttpUnary(config, 'session/create', { request }, signal, 20000);
               if (findSessionIdInPayload(createRes)) break;
             } catch (createErr) {
               lastErr = createErr instanceof Error ? createErr.message : String(createErr);
-              const msg = lastErr;
-              if (msg.includes('unexpected "request"')) {
+              if (lastErr.includes('unexpected "request"')) {
                 try {
-                  createRes = await callDshHttpUnary(
-                    config,
-                    'session/create',
-                    request,
-                    signal
-                  );
+                  createRes = await callDshHttpUnary(config, 'session/create', request, signal, 20000);
                   if (findSessionIdInPayload(createRes)) break;
                 } catch (retryErr) {
                   lastErr = retryErr instanceof Error ? retryErr.message : String(retryErr);
@@ -1572,235 +1674,296 @@ export function streamDshMuxReply(
 
         options?.onSessionResolved?.(sessionId);
 
-        // Step 2: Subscribe to live output via stream carrier (`/api/remote.mux` -> `session/follow`)
-        // Verified SessionFollowRequest shape: { address: { kind: "session", sessionId } }
-        const startFollow = () => {
-          if (!mux) return;
-          const followArgs: Record<string, unknown> = {
-            request: {
-              address: {
-                kind: 'session',
-                sessionId,
-              },
-              assistantStream: true,
-            },
-          };
-
-          followStreamId = mux.openStream('session/follow', followArgs, {
-            onItem: (item) => {
-              resetIdleTimer(60000);
-              try {
-                const rawPreview = JSON.stringify(item).slice(0, 320);
-                if (rawPreview) {
-                  recentRawFrames.push(rawPreview);
-                  if (recentRawFrames.length > 3) recentRawFrames.shift();
-                }
-              } catch {
-                // ignore serialization error
-              }
-              const events = extractFollowEvents(item);
-              for (const info of events) {
-                if (info.isSnapshot) continue;
-                if (!sawPostPromptEvent) continue;
-
-                if (info.error) {
-                  fail(new Error(`Agent 执行出错：${info.error}`));
-                  return;
-                }
-                if (info.reasoningDelta) {
-                  accumulatedThinking += info.reasoningDelta;
-                  emitUpdate(false);
-                }
-                if (info.toolStep) {
-                  const prev = toolStepsMap.get(info.toolStep.id);
-                  toolStepsMap.set(info.toolStep.id, {
-                    id: info.toolStep.id,
-                    name: info.toolStep.name || prev?.name || 'tool',
-                    status: info.toolStep.status,
-                    detail: info.toolStep.detail ?? prev?.detail,
-                    output: info.toolStep.output ?? prev?.output,
-                  });
-                  emitUpdate(false);
-                }
-                if (info.delta) {
-                  accumulated += info.delta;
-                  emitUpdate(false);
-                } else if (info.fullText) {
-                  accumulated = info.fullText;
-                  emitUpdate(Boolean(info.done));
-                }
-                if (info.done || (info.idleSignal && accumulated.length > 0)) {
-                  emitUpdate(true);
-                  succeed();
-                  return;
-                }
-              }
-            },
-            onEnd: () => {
-              if (!settled && accumulated) {
-                emitUpdate(true);
-                succeed();
-              }
-            },
-            onError: (errMsg) => {
-              if (!settled && !accumulated) {
-                fail(new Error(`订阅会话流 (session/follow) 失败：${errMsg}`));
-              }
-            },
-          });
-        };
-
-        startFollow();
-
-        // Step 3: Upload binary/image attachments via /api/session/uploadFileBinary if present
-        const mediaAttachments = (options?.attachments || []).filter(
-          (att) => !att.textContent && (att.base64Data || att.dataUrl)
-        );
+        // Step 2: Upload binary/image attachments BEFORE opening WS follow
+        // so Cloudflare Tunnel doesn't idle/drop the WebSocket while media is uploading
         const uploadedReceipts: Array<{ receiptId: string; att: ChatAttachment }> = [];
-        if (mediaAttachments.length > 0) {
-          resetIdleTimer(90000);
+        if (hasMedia) {
+          toolStepsMap.set('relay-upload', {
+            id: 'relay-upload',
+            name: `上传图片 (${mediaAttachments.length})`,
+            status: 'running',
+            detail: mediaAttachments.map((a) => `${a.name} · ${a.size}`).join(', '),
+          });
+          emitUpdate(false);
+
           for (const att of mediaAttachments) {
-            const receiptId = await uploadAttachmentToDsh(config, sessionId, att, signal);
-            if (receiptId) {
-              uploadedReceipts.push({ receiptId, att });
+            const res = await uploadAttachmentToDsh(config, sessionId, att, signal);
+            if (res.receiptId) {
+              uploadedReceipts.push({ receiptId: res.receiptId, att });
+            } else if (res.diagnostic) {
+              lastUploadDiagnostic = res.diagnostic;
             }
           }
+
+          toolStepsMap.set('relay-upload', {
+            id: 'relay-upload',
+            name:
+              uploadedReceipts.length === mediaAttachments.length
+                ? '图片上传完成'
+                : '切换内联图像发送',
+            status: 'done',
+            output:
+              uploadedReceipts.length === mediaAttachments.length
+                ? `已暂存 ${uploadedReceipts.length} 个附件，等待模型识图`
+                : lastUploadDiagnostic || '已附带压缩图像直传',
+          });
+          emitUpdate(false);
         }
 
-        // Submit prompt (with receiptId or fallback multimodal content) via HTTP POST unary carrier
-        const requestId = mintStreamId();
-        const clientTimeZone = getClientTimeZone();
-        sawPostPromptEvent = true;
+        if (signal?.aborted) {
+          const abortErr = new Error('已手动停止生成');
+          abortErr.name = 'AbortError';
+          throw abortErr;
+        }
 
-        const contentCandidates = buildMultimodalContentCandidates(
-          prompt,
-          options?.attachments,
-          uploadedReceipts
-        );
-        let promptRes: unknown;
-        let lastPromptError: Error | null = null;
+        // Step 3: Open fresh WS connection and subscribe to `session/follow`
+        connectTimer = window.setTimeout(() => {
+          fail(
+            new Error(
+              `连接 ${wsUrl} 超时（15s），请确认 Cloudflare Tunnel 域名可达且 WebSocket 转发正常。`
+            )
+          );
+        }, 15000);
 
-        for (let idx = 0; idx < contentCandidates.length; idx++) {
-          const candidateContent = contentCandidates[idx];
-          const reqBody: Record<string, unknown> = {
-            requestId: idx === 0 ? requestId : mintStreamId(),
-            sessionId,
-            mode: 'queue',
-            content: candidateContent,
-            clientTimeZone,
-          };
+        try {
+          ws = createDshWebSocket(wsUrl);
+        } catch (err) {
+          fail(new Error(`WebSocket 地址无效：${err instanceof Error ? err.message : wsUrl}`));
+          return;
+        }
+
+        ws.onopen = async () => {
+          wsOpened = true;
+          window.clearTimeout(connectTimer);
+          resetIdleTimer(hasMedia ? 120000 : 60000);
+          if (!ws) return;
+          mux = new SingleTurnMuxHelper(ws);
 
           try {
-            promptRes = await callDshHttpUnary(
-              config,
-              promptEndpoint,
-              { request: reqBody },
-              signal
-            );
-            lastPromptError = null;
-            break;
-          } catch (promptErr) {
-            if ((promptErr as Error).name === 'AbortError') throw promptErr;
-            const msg = promptErr instanceof Error ? promptErr.message : String(promptErr);
-            lastPromptError = new Error(msg);
-
-            const isBoundaryError =
-              msg.includes('boundary validation') ||
-              msg.includes('invalid_value') ||
-              msg.includes('invalid_union') ||
-              msg.includes('invalid_type') ||
-              msg.toLowerCase().includes('content');
-
-            if (isBoundaryError && idx < contentCandidates.length - 1) {
-              continue;
-            }
-
-            if (msg.includes('unexpected "mode"')) {
-              const withoutMode = { ...reqBody };
-              delete withoutMode.mode;
-              promptRes = await callDshHttpUnary(
-                config,
-                promptEndpoint,
-                { request: withoutMode },
-                signal
-              );
-              lastPromptError = null;
-              break;
-            }
-
-            if (
-              contentCandidates.length === 1 &&
-              msg.toLowerCase().includes('content') &&
-              (msg.toLowerCase().includes('string') || msg.toLowerCase().includes('expected'))
-            ) {
-              promptRes = await callDshHttpUnary(
-                config,
-                promptEndpoint,
-                {
-                  request: {
-                    ...reqBody,
-                    content: buildTextWithFileAttachments(prompt, options?.attachments),
-                  },
+            const followArgs: Record<string, unknown> = {
+              request: {
+                address: {
+                  kind: 'session',
+                  sessionId,
                 },
-                signal
-              );
-              lastPromptError = null;
-              break;
+                assistantStream: true,
+              },
+            };
+
+            followStreamId = mux.openStream('session/follow', followArgs, {
+              onItem: (item) => {
+                resetIdleTimer(hasMedia ? 120000 : 60000);
+                try {
+                  const rawPreview = JSON.stringify(item).slice(0, 320);
+                  if (rawPreview) {
+                    recentRawFrames.push(rawPreview);
+                    if (recentRawFrames.length > 3) recentRawFrames.shift();
+                  }
+                } catch {
+                  // ignore serialization error
+                }
+                const events = extractFollowEvents(item);
+                for (const info of events) {
+                  if (info.isSnapshot) continue;
+                  if (!sawPostPromptEvent) continue;
+
+                  if (info.error) {
+                    fail(new Error(`Agent 执行出错：${info.error}`));
+                    return;
+                  }
+                  if (info.reasoningDelta) {
+                    accumulatedThinking += info.reasoningDelta;
+                    emitUpdate(false);
+                  }
+                  if (info.toolStep) {
+                    const prev = toolStepsMap.get(info.toolStep.id);
+                    toolStepsMap.set(info.toolStep.id, {
+                      id: info.toolStep.id,
+                      name: info.toolStep.name || prev?.name || 'tool',
+                      status: info.toolStep.status,
+                      detail: info.toolStep.detail ?? prev?.detail,
+                      output: info.toolStep.output ?? prev?.output,
+                    });
+                    emitUpdate(false);
+                  }
+                  if (info.delta) {
+                    accumulated += info.delta;
+                    emitUpdate(false);
+                  } else if (info.fullText) {
+                    accumulated = info.fullText;
+                    emitUpdate(Boolean(info.done));
+                  }
+                  if (info.done || (info.idleSignal && accumulated.length > 0)) {
+                    emitUpdate(true);
+                    succeed();
+                    return;
+                  }
+                }
+              },
+              onEnd: () => {
+                if (!settled && accumulated) {
+                  emitUpdate(true);
+                  succeed();
+                }
+              },
+              onError: (errMsg) => {
+                if (!settled && !accumulated) {
+                  fail(new Error(`订阅会话流 (session/follow) 失败：${errMsg}`));
+                }
+              },
+            });
+
+            // Step 4: Submit prompt via HTTP POST unary carrier
+            const requestId = mintStreamId();
+            const clientTimeZone = getClientTimeZone();
+            sawPostPromptEvent = true;
+
+            const contentCandidates = buildMultimodalContentCandidates(
+              prompt,
+              options?.attachments,
+              uploadedReceipts
+            );
+            let promptRes: unknown;
+            let lastPromptError: Error | null = null;
+
+            for (let idx = 0; idx < contentCandidates.length; idx++) {
+              const candidateContent = contentCandidates[idx];
+              const reqBody: Record<string, unknown> = {
+                requestId: idx === 0 ? requestId : mintStreamId(),
+                sessionId,
+                mode: 'queue',
+                content: candidateContent,
+                clientTimeZone,
+              };
+
+              try {
+                promptRes = await callDshHttpUnary(
+                  config,
+                  promptEndpoint,
+                  { request: reqBody },
+                  signal,
+                  hasMedia ? 40000 : 25000
+                );
+                lastPromptError = null;
+                break;
+              } catch (promptErr) {
+                if ((promptErr as Error).name === 'AbortError') throw promptErr;
+                const msg = promptErr instanceof Error ? promptErr.message : String(promptErr);
+                lastPromptError = new Error(msg);
+
+                // Do NOT waste time retrying 6 inline base64 formats on network timeout or 413
+                if (msg.includes('超时') || msg.includes('413') || msg.includes('524') || msg.includes('504')) {
+                  break;
+                }
+
+                const isBoundaryError =
+                  msg.includes('boundary validation') ||
+                  msg.includes('invalid_value') ||
+                  msg.includes('invalid_union') ||
+                  msg.includes('invalid_type') ||
+                  msg.toLowerCase().includes('content');
+
+                if (isBoundaryError && idx < contentCandidates.length - 1) {
+                  continue;
+                }
+
+                if (msg.includes('unexpected "mode"')) {
+                  const withoutMode = { ...reqBody };
+                  delete withoutMode.mode;
+                  promptRes = await callDshHttpUnary(
+                    config,
+                    promptEndpoint,
+                    { request: withoutMode },
+                    signal,
+                    hasMedia ? 40000 : 25000
+                  );
+                  lastPromptError = null;
+                  break;
+                }
+
+                if (
+                  contentCandidates.length === 1 &&
+                  msg.toLowerCase().includes('content') &&
+                  (msg.toLowerCase().includes('string') || msg.toLowerCase().includes('expected'))
+                ) {
+                  promptRes = await callDshHttpUnary(
+                    config,
+                    promptEndpoint,
+                    {
+                      request: {
+                        ...reqBody,
+                        content: buildTextWithFileAttachments(prompt, options?.attachments),
+                      },
+                    },
+                    signal,
+                    25000
+                  );
+                  lastPromptError = null;
+                  break;
+                }
+
+                break;
+              }
             }
 
-            break;
-          }
-        }
+            if (lastPromptError) {
+              const uploadHint = lastUploadDiagnostic ? `（${lastUploadDiagnostic}）` : '';
+              throw new Error(`提交消息 (${promptEndpoint}) 失败：${lastPromptError.message}${uploadHint}`);
+            }
 
-        if (lastPromptError) {
-          throw new Error(`提交消息 (${promptEndpoint}) 失败：${lastPromptError.message}`);
-        }
+            // Fresh inference window after prompt is confirmed accepted by server
+            resetIdleTimer(hasMedia ? 120000 : 60000);
 
-        // If the unary prompt response itself already contains reply text, render it immediately
-        if (promptRes && typeof promptRes === 'object') {
-          const maybeText =
-            extractTextParts((promptRes as Record<string, unknown>).content) ||
-            (typeof (promptRes as Record<string, unknown>).reply === 'string'
-              ? String((promptRes as Record<string, unknown>).reply)
-              : '');
-          if (maybeText && !accumulated) {
-            const { cleanText, cards } = extractRelayCards(maybeText);
-            onChunk({ text: cleanText, cards, done: true });
-            succeed();
+            // If the unary prompt response itself already contains reply text, render it immediately
+            if (promptRes && typeof promptRes === 'object') {
+              const maybeText =
+                extractTextParts((promptRes as Record<string, unknown>).content) ||
+                (typeof (promptRes as Record<string, unknown>).reply === 'string'
+                  ? String((promptRes as Record<string, unknown>).reply)
+                  : '');
+              if (maybeText && !accumulated) {
+                const { cleanText, cards } = extractRelayCards(maybeText);
+                onChunk({ text: cleanText, cards, done: true });
+                succeed();
+              }
+            }
+          } catch (err) {
+            fail(err instanceof Error ? err : new Error(String(err)));
           }
-        }
+        };
+
+        ws.onerror = () => {
+          if (settled) return;
+          if (!wsOpened) {
+            diagnosingError = true;
+            window.clearTimeout(connectTimer);
+            window.clearTimeout(idleTimer);
+            void diagnoseWsHandshakeFailure(config.serverUrl, wsUrl).then((detail) => {
+              fail(new Error(detail));
+            });
+          }
+        };
+
+        ws.onclose = (ev) => {
+          if (!settled && !diagnosingError) {
+            if (accumulated) {
+              const { cleanText, cards } = extractRelayCards(accumulated);
+              onChunk({ text: cleanText, cards, done: true });
+              succeed();
+            } else {
+              fail(
+                new Error(
+                  `WebSocket 连接被关闭（code ${ev.code}${ev.reason ? `: ${ev.reason}` : ''}）。`
+                )
+              );
+            }
+          }
+        };
       } catch (err) {
         fail(err instanceof Error ? err : new Error(String(err)));
       }
     };
 
-    ws.onerror = () => {
-      if (settled) return;
-      if (!wsOpened) {
-        diagnosingError = true;
-        window.clearTimeout(connectTimer);
-        window.clearTimeout(idleTimer);
-        void diagnoseWsHandshakeFailure(config.serverUrl, wsUrl).then((detail) => {
-          fail(new Error(detail));
-        });
-      }
-      // If ws was already open, let onclose or the pending HTTP prompt error report the actual failure
-    };
-
-    ws.onclose = (ev) => {
-      if (!settled && !diagnosingError) {
-        if (accumulated) {
-          const { cleanText, cards } = extractRelayCards(accumulated);
-          onChunk({ text: cleanText, cards, done: true });
-          succeed();
-        } else {
-          fail(
-            new Error(
-              `WebSocket 连接被关闭（code ${ev.code}${ev.reason ? `: ${ev.reason}` : ''}）。`
-            )
-          );
-        }
-      }
-    };
+    void startTurn();
   });
 }
