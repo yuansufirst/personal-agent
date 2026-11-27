@@ -243,6 +243,17 @@ export async function transcribePcm(
   return text;
 }
 
+/** 录音开始前先把 TCP/TLS 通道焐热，省得开口后才建连（中继链路建连很慢）。 */
+function warmUpTranscribe(serverUrl: string): void {
+  const base = (serverUrl || '').trim().replace(/\/+$/, '');
+  if (!base) return;
+  try {
+    void fetch(`${base}/api/transcribe`, { method: 'GET', cache: 'no-store' }).catch(() => undefined);
+  } catch {
+    // ignore
+  }
+}
+
 /**
  * 启动「本地录音 + 服务器转写」的语音输入。
  * 返回 null 表示这台设备录不了音（没权限 / 不支持），调用方可以退回系统识别。
@@ -253,6 +264,8 @@ export async function startServerVoiceInput(
 ): Promise<VoiceSessionHandle | null> {
   let autoStopRef: (() => void) | null = null;
   const triggerAutoStop = () => autoStopRef?.();
+
+  warmUpTranscribe(serverUrl);
 
   let source: CaptureSource | null = null;
   try {
