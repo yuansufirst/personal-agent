@@ -175,7 +175,7 @@ public class NativeSpeechPlugin extends Plugin {
                     payload.put("level", level);
                     notifyListeners("recordLevel", payload);
                 });
-                if (rms > 700) {
+                if (rms > 1200) {
                     speechSeen = true;
                     silenceSince = 0L;
                 } else if (speechSeen && silenceSince == 0L) {
@@ -186,7 +186,10 @@ public class NativeSpeechPlugin extends Plugin {
                 autoStopRecording();
                 break;
             }
-            if (speechSeen && silenceSince > 0L && now - silenceSince > 1200) {
+            if (speechSeen
+                && now - recordStartedAt > 1500
+                && silenceSince > 0L
+                && now - silenceSince > 1500) {
                 autoStopRecording();
                 break;
             }
