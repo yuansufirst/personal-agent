@@ -272,8 +272,9 @@ export async function startServerVoiceInput(
     if (finishing) return;
     finishing = true;
     callbacks.onStateChange(false);
+    let recorded: CapturedPcm | null = null;
     try {
-      const recorded = await capture.stop();
+      recorded = await capture.stop();
       if (recorded.durationMs < MIN_SPEECH_MS || recorded.pcm.length === 0) {
         callbacks.onError('说话时间太短，再按一次试试');
         return;
@@ -287,7 +288,11 @@ export async function startServerVoiceInput(
         window.clearTimeout(timer);
       }
     } catch (err) {
-      callbacks.onError(err instanceof Error ? err.message : '语音转写失败，请重试');
+      const reason = err instanceof Error ? err.message : '语音转写失败，请重试';
+      const detail = recorded
+        ? `（${(recorded.durationMs / 1000).toFixed(1)}s / ${Math.round(recorded.pcm.byteLength / 1024)}KB）`
+        : '';
+      callbacks.onError(`语音失败：${reason}${detail}`);
     }
   };
 
