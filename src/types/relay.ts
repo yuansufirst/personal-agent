@@ -45,6 +45,7 @@ export type DeviceCapabilityKey =
   | 'calendar'
   | 'alarm'
   | 'notifications'
+  | 'postNotifications'
   | 'sms'
   | 'location'
   | 'files';
@@ -64,6 +65,7 @@ export type DeviceActionKind =
   | 'add_calendar_event'
   | 'write_clipboard'
   | 'save_file'
+  | 'send_notification'
   | 'read_clipboard'
   | 'read_calendar'
   | 'read_notifications'
@@ -116,12 +118,18 @@ export interface ReminderItem {
   title: string;
   dueLabel: string;
   dayGroup: 'today' | 'tomorrow' | 'week';
+  startAtMs?: number;
+  endAtMs?: number;
+  allDay?: boolean;
+  location?: string;
+  calendarEventId?: string;
+  source?: 'calendar' | 'reminder';
   repeat?: string;
   priority: 'normal' | 'high';
   channel: 'app' | 'browser' | 'ntfy';
   completed: boolean;
   note?: string;
-  origin?: 'agent' | 'user';
+  origin?: 'agent' | 'user' | 'calendar';
 }
 
 export interface GoalMilestone {
@@ -145,20 +153,55 @@ export interface AgentAppSyncPayload {
     id?: string;
     title: string;
     dueLabel?: string;
+    startAtMs?: number;
+    endAtMs?: number;
+    startTime?: string;
+    endTime?: string;
+    allDay?: boolean;
+    location?: string;
+    isCalendarEvent?: boolean;
     dayGroup?: 'today' | 'tomorrow' | 'week';
     priority?: 'normal' | 'high';
     channel?: 'app' | 'browser' | 'ntfy';
     note?: string;
     repeat?: string;
   }>;
+  updateReminders?: Array<{
+    id?: string;
+    matchTitle?: string;
+    title?: string;
+    dueLabel?: string;
+    startAtMs?: number;
+    endAtMs?: number;
+    startTime?: string;
+    endTime?: string;
+    allDay?: boolean;
+    location?: string;
+    dayGroup?: 'today' | 'tomorrow' | 'week';
+    priority?: 'normal' | 'high';
+    channel?: 'app' | 'browser' | 'ntfy';
+    note?: string;
+    repeat?: string;
+    completed?: boolean;
+  }>;
   completeReminderIds?: string[];
   deleteReminderIds?: string[];
+  removeReminders?: string[];
   addGoals?: Array<{
     id?: string;
     title: string;
     notes?: string;
     milestones?: Array<string | { id?: string; text: string; done?: boolean }>;
   }>;
+  updateGoals?: Array<{
+    id?: string;
+    matchTitle?: string;
+    title?: string;
+    notes?: string;
+    status?: 'active' | 'paused' | 'completed';
+    addMilestones?: string[];
+  }>;
+  deleteGoalIds?: string[];
   completeMilestoneMatches?: Array<{
     goalId?: string;
     goalTitle?: string;
@@ -178,6 +221,7 @@ export interface AgentAppSyncPayload {
     relevanceNote?: string;
     url?: string;
   }>;
+  deleteBriefingIds?: string[];
   updateHealth?: {
     sleepHours?: number;
     steps?: number;

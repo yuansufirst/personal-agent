@@ -11,6 +11,7 @@ export interface DevicePermissionStatus {
   calendar: boolean;
   alarm: boolean;
   notifications: boolean;
+  postNotifications?: boolean;
   sms: boolean;
   location: boolean;
   files: boolean;
@@ -93,6 +94,7 @@ interface NativeDeviceBridgePlugin {
   getCalendarEvents(options?: {
     daysAhead?: number;
     limit?: number;
+    upcomingOnly?: boolean;
   }): Promise<{ events: DeviceCalendarEvent[]; count: number }>;
   createCalendarEvent(options: {
     title: string;
@@ -143,6 +145,22 @@ interface NativeDeviceBridgePlugin {
     base64Data: string;
     mimeType?: string;
   }): Promise<{ ok: boolean; uri: string; filename: string; location: string }>;
+  sendLocalNotification(options: {
+    id?: string;
+    title: string;
+    body: string;
+    channel?: 'reminders' | 'updates';
+  }): Promise<{ ok: boolean; notificationId?: number }>;
+  scheduleLocalNotification(options: {
+    id: string;
+    title: string;
+    body: string;
+    triggerAtMs: number;
+    channel?: 'reminders' | 'updates';
+  }): Promise<{ ok: boolean; notificationId?: number; triggerAtMs?: number; immediate?: boolean }>;
+  cancelLocalNotification(options: {
+    id: string;
+  }): Promise<{ ok: boolean; notificationId?: number }>;
 }
 
 const NativeDeviceBridge = registerPlugin<NativeDeviceBridgePlugin>('DeviceBridge');
@@ -178,6 +196,8 @@ export async function getDevicePermissions(): Promise<DevicePermissionStatus> {
     calendar: false,
     alarm: false,
     notifications: false,
+    postNotifications:
+      typeof Notification !== 'undefined' && Notification.permission === 'granted',
     sms: false,
     location: typeof navigator !== 'undefined' && Boolean(navigator.geolocation),
     files: false,
@@ -190,6 +210,10 @@ export async function requestDevicePermission(
 ): Promise<{ granted: boolean; folderLabel?: string }> {
   if (hasNativeDeviceBridge()) {
     return NativeDeviceBridge.requestCapabilityPermission({ capability });
+  }
+  if (capability === 'postNotifications' && typeof Notification !== 'undefined') {
+    const res = await Notification.requestPermission();
+    return { granted: res === 'granted' };
   }
   if (capability === 'location' && typeof navigator !== 'undefined' && navigator.geolocation) {
     return new Promise((resolve) => {
@@ -254,13 +278,17 @@ export async function writeDeviceClipboard(text: string, label = 'Relay'): Promi
 
 export async function getDeviceCalendarEvents(
   daysAhead = 7,
-  limit = 25
+  limit = 25,
+  upcomingOnly = true
 ): Promise<DeviceCalendarEvent[]> {
   if (!hasNativeDeviceBridge()) {
     throw new Error('读取系统日历需要在 Android APK 中运行');
   }
-  const res = await NativeDeviceBridge.getCalendarEvents({ daysAhead, limit });
-  return res.events || [];
+  const res = await NativeDeviceBridge.getCalendarEvents({ daysAhead, limit, upcomingOnly });
+  const list = res.events || [];
+  if (!upcomingOnly) return list;
+  const now = Date.now();
+  return list.filter((ev) => (ev.endMs > 0 ? ev.endMs : ev.startMs) > now);
 }
 
 export async function createDeviceCalendarEvent(options: {
@@ -419,6 +447,159 @@ export async function saveBinaryFileToDevice(options: {
     }
     throw err;
   }
+}
+
+export async function sendLocalDeviceNotification(options: {
+  id?: string;
+  title: string;
+  body: string;
+  channel?: 'reminders' | 'updates';
+}): Promise<{ ok: boolean; mode: 'android' | 'web' | 'none'; detail: string }> {
+  if (hasNativeDeviceBridge()) {
+    try {
+      await NativeDeviceBridge.sendLocalNotification({
+        id: options.id,
+        title: options.title,
+        body: options.body,
+        channel: options.channel || 'reminders',
+      });
+      return { ok: true, mode: 'android', detail: '已发送至手机通知栏' };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (/not implemented|unimplemented/i.test(msg)) {
+        return { ok: false, mode: 'none', detail: '当前 APK 版本暂未包含原生通知模块，请更新安装包' };
+      }
+      return { ok: false, mode: 'none', detail: msg || '发送通知失败' };
+    }
+  }
+
+  if (typeof Notification !== 'undefined') {
+    const perm =
+      Notification.permission === 'granted'
+        ? 'granted'
+        : await Notification.requestPermission();
+    if (perm === 'granted') {
+      new Notification(options.title, { body: options.body });
+      return { ok: true, mode: 'web', detail: '已发送浏览器通知' };
+    }
+  }
+
+  return { ok: false, mode: 'none', detail: '未开启通知权限' };
+}
+
+export async function scheduleLocalDeviceNotification(options: {
+  id: string;
+  title: string;
+  body: string;
+  triggerAtMs: number;
+  channel?: 'reminders' | 'updates';
+}): Promise<boolean> {
+  if (!hasNativeDeviceBridge()) return false;
+  try {
+    await NativeDeviceBridge.scheduleLocalNotification({
+      id: options.id,
+      title: options.title,
+      body: options.body,
+      triggerAtMs: options.triggerAtMs,
+      channel: options.channel || 'reminders',
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function cancelLocalDeviceNotification(id: string): Promise<void> {
+  if (!hasNativeDeviceBridge()) return;
+  try {
+    await NativeDeviceBridge.cancelLocalNotification({ id });
+  } catch {
+    // ignore on older APKs or non-native runtimes
+  }
+}
+
+const SENSITIVE_ACTION_PATTERN =
+  /(支付|付款|转账|密码|口令|银行卡|信用卡|储蓄卡|卡号|cvv|安全码|验证码|校验码|动态码|钱包|余额|账单|身份证|护照|社保|私钥|密钥|助记词|令牌|支付宝|微信支付|password|passcode|pin\b|otp|2fa|bank|payment|credit\s*card|secret|private\s*key|credential|alipay|wechat\s*pay)/i;
+
+const SENSITIVE_CONTENT_RULES: Array<{ label: string; regex: RegExp }> = [
+  {
+    label: '支付或银行账务信息',
+    regex: /(支付密码|付款码|转账|余额|银行卡|信用卡|储蓄卡|扣款|支付宝|微信支付|银联|网银|账单金额|CVV|CVC)/i,
+  },
+  {
+    label: '密码、密钥或凭证',
+    regex: /(密码[:：\s=]|口令[:：\s=]|password\s*[:=]|passcode\s*[:=]|api[_-]?key|secret[_-]?key|private\s*key|BEGIN\s+(?:RSA|EC|OPENSSH)?\s*PRIVATE\s+KEY|sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{20,}|助记词)/i,
+  },
+  {
+    label: '短信或登录验证码',
+    regex: /(验证码|校验码|动态码|动态密码|确认码|安全码|verification\s*code|security\s*code|one[- ]time\s*(?:password|code)|\botp\b).{0,24}\d{4,8}|\d{4,8}.{0,16}(验证码|校验码|动态码)/i,
+  },
+  {
+    label: '银行卡号或身份证号',
+    regex: /\b(?:4\d{15}|5[1-5]\d{14}|62\d{14,17})\b|\b[1-9]\d{5}(?:19|20)\d{2}(?:0[1-9]|1[0-2])(?:0[1-9]|[12]\d|3[01])\d{3}[\dXx]\b/,
+  },
+];
+
+/**
+ * Determines whether a phone action requires an explicit confirmation popup.
+ * Ordinary phone actions execute silently; ONLY genuinely sensitive data
+ * (payment, passwords, OTP, bank info, private keys) triggers a popup.
+ */
+export function assessDeviceActionSensitivity(action: DeviceActionItem): {
+  sensitive: boolean;
+  reason: string;
+} {
+  const params = action.params || {};
+  if (params.sensitive === true) {
+    return {
+      sensitive: true,
+      reason: '该操作被标记为敏感数据访问',
+    };
+  }
+
+  const combinedText = `${action.title || ''} ${action.summary || ''} ${JSON.stringify(params)}`;
+  const match = combinedText.match(SENSITIVE_ACTION_PATTERN);
+  if (match) {
+    return {
+      sensitive: true,
+      reason: `涉及敏感信息（${match[0]}），需你确认后才允许获取`,
+    };
+  }
+
+  return { sensitive: false, reason: '' };
+}
+
+/**
+ * Post-read guard: inspects text retrieved from clipboard / SMS / notifications / files
+ * before silently sending it to the cloud Agent.
+ */
+export function detectSensitiveContent(text: string): {
+  sensitive: boolean;
+  reason: string;
+  maskedPreview: string;
+} {
+  const sample = (text || '').trim();
+  if (!sample) {
+    return { sensitive: false, reason: '', maskedPreview: '' };
+  }
+
+  for (const rule of SENSITIVE_CONTENT_RULES) {
+    if (rule.regex.test(sample)) {
+      const masked = sample
+        .replace(/\b\d{4,19}\b/g, (m) =>
+          m.length <= 6 ? '••••' : `${m.slice(0, 2)}••••${m.slice(-2)}`
+        )
+        .replace(/(sk-|ghp_)[a-zA-Z0-9_-]{8,}/g, '$1••••••••')
+        .slice(0, 220);
+      return {
+        sensitive: true,
+        reason: `读取内容中检测到${rule.label}`,
+        maskedPreview: masked,
+      };
+    }
+  }
+
+  return { sensitive: false, reason: '', maskedPreview: '' };
 }
 
 /**
@@ -689,6 +870,38 @@ export async function executeDeviceAction(
       await writeDeviceFileText(filename, content, mimeType);
       return { ok: true, resultText: `已保存文件到手机目录：${filename}` };
     }
+    case 'send_notification': {
+      const title = String(p.title || item.title || 'Relay 提醒');
+      const body = String(p.body || p.message || item.summary || title);
+      const channel: 'reminders' | 'updates' =
+        p.channel === 'updates' ? 'updates' : 'reminders';
+      const triggerMs =
+        typeof p.triggerAtMs === 'number'
+          ? p.triggerAtMs
+          : typeof p.triggerTime === 'string'
+            ? Date.parse(p.triggerTime)
+            : NaN;
+      if (Number.isFinite(triggerMs) && triggerMs > Date.now() + 5000) {
+        await scheduleLocalDeviceNotification({
+          id: String(p.id || item.id),
+          title,
+          body,
+          triggerAtMs: triggerMs,
+          channel,
+        });
+        return { ok: true, resultText: `已定时手机通知栏提醒：「${title}」` };
+      }
+      const res = await sendLocalDeviceNotification({
+        id: String(p.id || item.id),
+        title,
+        body,
+        channel,
+      });
+      if (!res.ok) {
+        throw new Error(res.detail);
+      }
+      return { ok: true, resultText: `已推送到手机通知栏：「${title}」` };
+    }
     case 'read_clipboard': {
       const snap = await captureCapabilityContext('clipboard');
       return { ok: true, resultText: '已读取手机剪贴板并回传给助理', replyToAgent: snap.text };
@@ -702,6 +915,22 @@ export async function executeDeviceAction(
       return { ok: true, resultText: '已读取手机通知并回传给助理', replyToAgent: snap.text };
     }
     case 'read_sms': {
+      const keyword = typeof p.keyword === 'string' ? p.keyword.trim() : '';
+      const limit = typeof p.limit === 'number' && p.limit > 0 ? Math.min(30, p.limit) : 12;
+      if (keyword) {
+        const msgs = await getDeviceRecentSms(limit, keyword);
+        const lines = msgs.map(
+          (m) => `- [${m.tag} · ${m.address} · ${formatShortTime(m.timestamp)}] ${m.body}`
+        );
+        return {
+          ok: true,
+          resultText: `已读取包含「${keyword}」的短信并回传给助理`,
+          replyToAgent:
+            msgs.length > 0
+              ? `[手机短信 · 关键词:${keyword}]\n${lines.join('\n')}`
+              : `[手机短信 · 关键词:${keyword}] 未找到匹配短信。`,
+        };
+      }
       const snap = await captureCapabilityContext('sms');
       return { ok: true, resultText: '已读取近期短信并回传给助理', replyToAgent: snap.text };
     }
@@ -720,17 +949,18 @@ export async function executeDeviceAction(
 
 /**
  * Copyable skill prompt so the user's cloud DSH Agent immediately understands
- * how to read phone context and emit executable `relay-action` cards.
+ * how to read phone context and emit executable `relay-action` blocks.
  */
 export const AGENT_DEVICE_PROTOCOL_PROMPT = `你现在通过 Relay Android 客户端与我的手机相连。
-当你需要操作我的手机或请求实时手机数据时，可以在回复中输出一个 \`\`\`relay-action\`\`\` JSON 代码块，Relay 客户端会自动渲染为可一键执行的原生卡片：
+当你需要操作我的手机或请求实时手机数据时，可以在回复中输出一个 \`\`\`relay-action\`\`\` JSON 代码块。普通手机权限会在端侧自动静默执行并回传结果，仅涉及支付、密码、银行卡、验证码等敏感数据时才会弹出确认窗口：
 
 支持的 action 类型：
 1. 设系统闹钟：{"action":"set_alarm","title":"明早起床闹钟","summary":"07:30 · 起床","params":{"hour":7,"minute":30,"message":"起床","skipUi":true}}
 2. 设系统倒计时：{"action":"set_timer","title":"番茄钟倒计时","summary":"25 分钟 · 专注阅读","params":{"seconds":1500,"message":"专注阅读","skipUi":true}}
 3. 写入系统日历：{"action":"add_calendar_event","title":"组会讨论","summary":"明天 15:00-16:00","params":{"title":"组会讨论","startTime":"2026-11-28T15:00:00+08:00","endTime":"2026-11-28T16:00:00+08:00","location":"会议室 A","reminderMinutes":15}}
-4. 写入手机剪贴板：{"action":"write_clipboard","title":"复制回复内容","summary":"一键写入手机剪贴板","params":{"text":"要复制的文本"}}
-5. 保存文档到手机：{"action":"save_file","title":"保存摘要到手机","summary":"写入已授权文件夹","params":{"filename":"summary.md","content":"# 摘要..."}}
-6. 请求读取手机数据（我点击后会自动回传）：action 可选 "read_clipboard" | "read_calendar" | "read_notifications" | "read_sms" | "get_location" | "list_files"，params 为 {}。
+4. 发送/定时手机通知栏通知：{"action":"send_notification","title":"实验已完成","summary":"推送到手机通知栏","params":{"title":"实验已完成","body":"GPU 训练已收敛，准确率 94.2%","triggerTime":"可选 ISO 时间"}}
+5. 写入手机剪贴板：{"action":"write_clipboard","title":"复制回复内容","summary":"一键写入手机剪贴板","params":{"text":"要复制的文本"}}
+6. 保存文档到手机：{"action":"save_file","title":"保存摘要到手机","summary":"写入已授权文件夹","params":{"filename":"summary.md","content":"# 摘要..."}}
+7. 自动读取手机数据并回传：action 可选 "read_clipboard" | "read_calendar" | "read_notifications" | "read_sms" | "get_location" | "list_files"（read_sms 可选 params.keyword 过滤关键词；如涉及支付/密码/验证码请标记 "sensitive":true）。
 
 同时，当我的消息开头附带 [手机实时情境] 块时，请直接结合其中的本地时间、日程、位置、通知或剪贴板内容来回答。`;

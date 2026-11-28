@@ -1,8 +1,9 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { Check, GripVertical, X } from 'lucide-react';
+import { Calendar, Check, GripVertical, X } from 'lucide-react';
 import type { AgentProfile, ConnectionConfig, GoalItem, ReminderItem } from '../types/relay';
 import { sendNtfyNotification } from '../services/agentClient';
+import { sendLocalDeviceNotification } from '../services/deviceBridge';
 import { useGridDragReorder } from '../hooks/useGridDragReorder';
 import { MuseAvatarHeader } from './MuseAvatarHeader';
 import {
@@ -28,9 +29,11 @@ interface GoalsViewProps {
   config: ConnectionConfig;
   agentProfile?: AgentProfile;
   isVoiceActive?: boolean;
+  isSyncingCalendar?: boolean;
   onOpenDrawer?: () => void;
   onTapAvatar?: () => void;
   onSyncStateWithAgent?: () => void;
+  onSyncCalendar?: () => void;
   onAddGoal: (title: string, notes: string, milestones: string[]) => void;
   onToggleMilestone: (goalId: string, milestoneId: string) => void;
   onReorderGoals?: (nextGoals: GoalItem[]) => void;
@@ -152,9 +155,11 @@ export const GoalsView: React.FC<GoalsViewProps> = ({
   config,
   agentProfile,
   isVoiceActive = false,
+  isSyncingCalendar = false,
   onOpenDrawer,
   onTapAvatar,
   onSyncStateWithAgent,
+  onSyncCalendar,
   onAddGoal,
   onToggleMilestone,
   onReorderGoals,
@@ -196,7 +201,7 @@ export const GoalsView: React.FC<GoalsViewProps> = ({
   const [remTime, setRemTime] = useState('20:00');
   const [remDay, setRemDay] = useState<'today' | 'tomorrow' | 'week'>('today');
   const [remPriority, setRemPriority] = useState<'normal' | 'high'>('normal');
-  const [remChannel, setRemChannel] = useState<'ntfy' | 'browser' | 'app'>('ntfy');
+  const [remChannel, setRemChannel] = useState<'ntfy' | 'browser' | 'app'>('app');
 
   useEffect(() => {
     try {
@@ -300,18 +305,13 @@ export const GoalsView: React.FC<GoalsViewProps> = ({
       onShowToast(res.detail);
       return;
     }
-    if (typeof Notification !== 'undefined') {
-      const perm =
-        Notification.permission === 'granted'
-          ? 'granted'
-          : await Notification.requestPermission();
-      if (perm === 'granted') {
-        new Notification('Relay 提醒', { body: `${item.title} · ${item.dueLabel}` });
-        onShowToast('已推送');
-        return;
-      }
-    }
-    onShowToast(item.title);
+    const res = await sendLocalDeviceNotification({
+      id: item.id,
+      title: item.source === 'calendar' ? '日程提醒' : 'Relay 提醒',
+      body: `${item.title} · ${item.dueLabel}${item.location ? ` @ ${item.location}` : ''}`,
+      channel: 'reminders',
+    });
+    onShowToast(res.detail);
   };
 
   return (
@@ -470,28 +470,43 @@ export const GoalsView: React.FC<GoalsViewProps> = ({
           )
         ) : (
           <div className="mt-4 space-y-3">
-            <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
-              {(
-                [
-                  ['today', '今天'],
-                  ['tomorrow', '明天'],
-                  ['week', '本周'],
-                  ['completed', '已完成'],
-                ] as [ReminderFilter, string][]
-              ).map(([k, label]) => (
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1.5 overflow-x-auto pb-0.5">
+                {(
+                  [
+                    ['today', '今天'],
+                    ['tomorrow', '明天'],
+                    ['week', '本周'],
+                    ['completed', '已完成'],
+                  ] as [ReminderFilter, string][]
+                ).map(([k, label]) => (
+                  <button
+                    key={k}
+                    type="button"
+                    onClick={() => setRemFilter(k)}
+                    className={`rounded-full px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap ${
+                      remFilter === k
+                        ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
+                        : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200/70 dark:bg-zinc-800 dark:text-zinc-400'
+                    }`}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+
+              {onSyncCalendar && (
                 <button
-                  key={k}
                   type="button"
-                  onClick={() => setRemFilter(k)}
-                  className={`rounded-full px-3 py-1 text-xs font-medium transition-colors whitespace-nowrap ${
-                    remFilter === k
-                      ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-950'
-                      : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200/70 dark:bg-zinc-800 dark:text-zinc-400'
-                  }`}
+                  onClick={onSyncCalendar}
+                  disabled={isSyncingCalendar}
+                  title="从系统日历同步并自动清理过期日程"
+                  className="inline-flex shrink-0 items-center gap-1 rounded-full border border-black/[0.08] bg-white px-2.5 py-1 text-[11px] font-medium text-zinc-700 transition-colors hover:bg-zinc-50 disabled:opacity-50 dark:border-white/10 dark:bg-zinc-900 dark:text-zinc-300"
                 >
-                  {label}
+                  <Calendar className={`h-3 w-3 ${isSyncingCalendar ? 'animate-pulse' : ''}`} />
+                  <span>日历</span>
                 </button>
-              ))}
+              )}
             </div>
 
             {filteredReminders.length === 0 ? (
@@ -529,8 +544,18 @@ export const GoalsView: React.FC<GoalsViewProps> = ({
                         >
                           {item.title}
                         </div>
-                        <div className="font-mono-tabular text-[11px] text-[var(--relay-text-faint)]">
-                          {item.dueLabel}
+                        <div className="flex items-center gap-1.5 font-mono-tabular text-[11px] text-[var(--relay-text-faint)]">
+                          <span>{item.dueLabel}</span>
+                          {item.source === 'calendar' && (
+                            <span className="font-sans text-[10px] text-zinc-500 dark:text-zinc-400">
+                              · 日历
+                            </span>
+                          )}
+                          {item.location && (
+                            <span className="truncate font-sans text-[10px] text-zinc-400">
+                              · {item.location}
+                            </span>
+                          )}
                         </div>
                       </div>
                     </button>
@@ -760,9 +785,9 @@ export const GoalsView: React.FC<GoalsViewProps> = ({
                     aria-label="渠道"
                     className="min-h-[40px] rounded-xl border border-black/[0.09] bg-zinc-50 px-2.5 text-xs text-[var(--relay-text)] dark:border-white/12 dark:bg-zinc-900"
                   >
+                    <option value="app">通知栏</option>
+                    <option value="browser">浏览器</option>
                     <option value="ntfy">ntfy</option>
-                    <option value="browser">通知</option>
-                    <option value="app">应用内</option>
                   </select>
                 </div>
 

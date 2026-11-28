@@ -1,28 +1,36 @@
 import type { AgentAppSyncPayload, InteractiveCard, MapCardItem } from '../types/relay';
 import { extractAgentSyncPayloads } from './agentSyncProtocol';
+import { parseScheduleTiming } from './scheduleCalendar';
 
 /**
  * Full protocol prompt for teaching a live cloud Agent (DeepSeek Harness / OpenAI-compatible)
  * to output structured ```relay-card and ```relay-sync blocks that Relay renders & applies automatically.
  */
 export const RELAY_CARDS_PROTOCOL_PROMPT = `请将以下「Relay 移动端卡片与自动同步协议」记住并写入长期偏好：
-1) 每次我发消息时，系统都会自动附带 [Relay App 自动状态同步] 快照，你可以直接读取我最新的提醒、目标里程碑完成情况、简报和健康进度，不需要让我手动汇报。
-2) 当你要自动帮我写入新的提醒、待办、目标、论文汇报，或更新已有条目的完成状态时，请在回复末尾附带 \`\`\`relay-sync 代码块（合法 JSON），App 会自动写入 Feeds / Goals / 日程，无需我手动添加：
+1) 每次我发消息时，系统都会自动附带 [Relay App 自动状态同步] 快照，你可以直接读取我最新的日历日程、提醒（含 id）、目标里程碑完成情况、简报和健康进度，不需要让我手动汇报。
+2) 当你要自动帮我新增、修改、删除提醒/日程、目标、论文汇报，或更新已有条目的完成状态时，请在回复末尾附带 \`\`\`relay-sync 代码块（合法 JSON），App 会自动同步并在手机通知栏定时提醒（日程过点后会自动移除）：
 \`\`\`relay-sync
 {
   "addReminders": [
-    { "title": "提交实验周报", "dueLabel": "明天 09:30", "dayGroup": "tomorrow", "priority": "high" }
+    { "title": "提交实验周报", "startTime": "2026-11-29T09:30:00+08:00", "dueLabel": "明天 09:30", "dayGroup": "tomorrow", "priority": "high" }
   ],
+  "updateReminders": [
+    { "id": "已有提醒id或省略改用matchTitle", "matchTitle": "旧标题", "title": "修改后的标题", "startTime": "2026-11-29T14:00:00+08:00", "dueLabel": "明天 14:00" }
+  ],
+  "deleteReminderIds": ["要删除的提醒 id 或标题"],
   "completeReminderIds": [],
   "addGoals": [
     { "title": "完成论文初稿", "notes": "Productivity", "milestones": ["整理消融实验表格", "撰写 Method 章节"] }
   ],
+  "updateGoals": [],
+  "deleteGoalIds": [],
   "completeMilestoneMatches": [
     { "goalTitle": "完成论文初稿", "milestoneText": "整理消融实验表格", "done": true }
   ],
   "addBriefings": [
     { "kind": "paper", "title": "论文或简报标题", "source": "arXiv cs.AI", "summary": "核心结论摘要", "takeaways": ["要点 1", "要点 2"] }
-  ]
+  ],
+  "deleteBriefingIds": []
 }
 \`\`\`
 3) 当回复涉及交互卡片时，请在末尾附带 \`\`\`relay-card 代码块（合法 JSON，支持单个对象或数组）：
@@ -180,6 +188,43 @@ function normalizeCard(raw: unknown): InteractiveCard | null {
           d.status === 'paused' || d.status === 'completed' ? d.status : 'active',
         milestones,
         updatedAt: String(d.updatedAt || '刚刚'),
+        origin: 'agent',
+      },
+    };
+  }
+
+  if (type === 'reminder') {
+    const d = obj.data as Record<string, unknown>;
+    const title = String(d.title || '').trim();
+    if (!title) return null;
+    const timing = parseScheduleTiming({
+      startAtMs: typeof d.startAtMs === 'number' ? d.startAtMs : undefined,
+      endAtMs: typeof d.endAtMs === 'number' ? d.endAtMs : undefined,
+      startTime: typeof d.startTime === 'string' ? d.startTime : undefined,
+      endTime: typeof d.endTime === 'string' ? d.endTime : undefined,
+      dueLabel: typeof d.dueLabel === 'string' ? d.dueLabel : undefined,
+      dayGroup:
+        d.dayGroup === 'tomorrow' || d.dayGroup === 'week' ? d.dayGroup : 'today',
+      allDay: Boolean(d.allDay),
+    });
+    return {
+      type: 'reminder',
+      data: {
+        id: String(d.id || `rem-${Date.now().toString(36)}`),
+        title,
+        dueLabel: timing.dueLabel,
+        dayGroup: timing.dayGroup,
+        startAtMs: timing.startAtMs,
+        endAtMs: timing.endAtMs,
+        allDay: timing.allDay,
+        location: typeof d.location === 'string' ? d.location : undefined,
+        source: d.source === 'calendar' ? 'calendar' : 'reminder',
+        repeat: typeof d.repeat === 'string' ? d.repeat : undefined,
+        priority: d.priority === 'high' ? 'high' : 'normal',
+        channel:
+          d.channel === 'ntfy' || d.channel === 'browser' ? d.channel : 'app',
+        completed: Boolean(d.completed),
+        note: typeof d.note === 'string' ? d.note : undefined,
         origin: 'agent',
       },
     };

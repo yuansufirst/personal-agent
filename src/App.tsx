@@ -10,6 +10,7 @@ import {
   Hash,
   Pencil,
   Search,
+  ShieldAlert,
   X,
 } from 'lucide-react';
 import {
@@ -72,9 +73,17 @@ import { registerAndroidBackHandler, syncNativeStatusBar } from './services/nati
 import { DEFAULT_AGENT_PROFILE, resolveAvatarSrc } from './services/avatarPresets';
 import { startVoiceRecognition, type SpeechSessionHandle } from './services/nativeSpeech';
 import {
+  assessDeviceActionSensitivity,
   buildAutoContextHeader,
+  cancelLocalDeviceNotification,
   DEFAULT_DEVICE_CONTEXT_CONFIG,
+  detectSensitiveContent,
   executeDeviceAction,
+  getDeviceCalendarEvents,
+  getDevicePermissions,
+  hasNativeDeviceBridge,
+  scheduleLocalDeviceNotification,
+  sendLocalDeviceNotification,
 } from './services/deviceBridge';
 import {
   applyAgentUpdatesToAppState,
@@ -82,6 +91,20 @@ import {
   buildManualAppStateSyncPrompt,
   formatSyncToast,
 } from './services/agentSyncProtocol';
+import {
+  mergeSystemCalendarEvents,
+  parseScheduleTiming,
+  pruneExpiredSchedules,
+} from './services/scheduleCalendar';
+
+interface SensitiveConfirmRequest {
+  id: string;
+  stage: 'pre-action' | 'post-read';
+  action: DeviceActionItem;
+  reason: string;
+  maskedPreview?: string;
+  pendingReplyToAgent?: string;
+}
 
 const STORAGE_KEYS = {
   config: 'relay_connection_config_v2',
@@ -253,7 +276,7 @@ export default function App() {
   );
 
   const [reminders, setReminders] = useState<ReminderItem[]>(() =>
-    loadFromStorage(STORAGE_KEYS.reminders, [])
+    pruneExpiredSchedules(loadFromStorage<ReminderItem[]>(STORAGE_KEYS.reminders, [])).items
   );
 
   const [nodes, setNodes] = useState<MeshNode[]>(() => {
@@ -293,6 +316,11 @@ export default function App() {
   const [isLoadingSessions, setIsLoadingSessions] = useState(false);
   const [isLoadingHistory, setIsLoadingHistory] = useState(false);
   const [toast, setToast] = useState<string | null>(null);
+  const [sensitiveConfirmQueue, setSensitiveConfirmQueue] = useState<SensitiveConfirmRequest[]>(
+    []
+  );
+  const [isSyncingCalendar, setIsSyncingCalendar] = useState(false);
+  const activeSensitiveConfirm = sensitiveConfirmQueue[0] ?? null;
 
   // Sidebar session helpers
   const [sidebarSearch, setSidebarSearch] = useState('');
@@ -324,6 +352,10 @@ export default function App() {
   const healthConfigRef = useRef<HealthConfig>(healthConfig);
   const ingestedCardIdsRef = useRef<Set<string>>(
     new Set(loadFromStorage<string[]>('relay_ingested_card_ids_v1', []))
+  );
+  const scheduledNotifKeysRef = useRef<Map<string, string>>(new Map());
+  const sendMessageRef = useRef<(text: string, attachments?: ChatAttachment[]) => Promise<void>>(
+    async () => {}
   );
 
   useEffect(() => {
@@ -374,6 +406,10 @@ export default function App() {
 
   useEffect(() => {
     return registerAndroidBackHandler(() => {
+      if (activeSensitiveConfirm) {
+        setSensitiveConfirmQueue((prev) => prev.slice(1));
+        return true;
+      }
       if (libraryPopoverOpen) {
         setLibraryPopoverOpen(false);
         return true;
@@ -404,7 +440,16 @@ export default function App() {
       }
       return false;
     });
-  }, [drawerOpen, settingsOpen, connectionOpen, selectedBriefing, previewFile, activeTab]);
+  }, [
+    activeSensitiveConfirm,
+    libraryPopoverOpen,
+    drawerOpen,
+    settingsOpen,
+    connectionOpen,
+    selectedBriefing,
+    previewFile,
+    activeTab,
+  ]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.profile, JSON.stringify(agentProfile));
@@ -478,6 +523,212 @@ export default function App() {
     }
     toastTimerRef.current = window.setTimeout(() => setToast(null), 2800);
   }, []);
+
+  // Sync Android system calendar into schedule list & auto-prune expired events
+  const syncSystemCalendarSchedules = useCallback(
+    async (silent = true) => {
+      if (!hasNativeDeviceBridge()) {
+        if (!silent) {
+          const pruned = pruneExpiredSchedules(remindersRef.current, Date.now());
+          if (pruned.changed) {
+            remindersRef.current = pruned.items;
+            setReminders(pruned.items);
+          }
+          showToast('已按当前时间刷新日程，系统日历同步仅支持 Android APK');
+        }
+        return;
+      }
+
+      if (!silent) setIsSyncingCalendar(true);
+      try {
+        if (silent) {
+          const perms = await getDevicePermissions();
+          if (!perms.calendar) return;
+        }
+        const events = await getDeviceCalendarEvents(7, 40, true);
+        const merged = mergeSystemCalendarEvents(remindersRef.current, events, Date.now());
+        if (merged.changed) {
+          remindersRef.current = merged.items;
+          setReminders(merged.items);
+          merged.removedIds.forEach((id) => {
+            void cancelLocalDeviceNotification(id);
+          });
+        }
+        if (!silent) {
+          showToast(
+            merged.syncedCount > 0
+              ? `已从系统日历同步 ${merged.syncedCount} 条日程`
+              : '未来 7 天暂无待办系统日历日程'
+          );
+        }
+      } catch (err) {
+        if (!silent) {
+          showToast(err instanceof Error ? err.message : '读取系统日历失败');
+        }
+      } finally {
+        if (!silent) setIsSyncingCalendar(false);
+      }
+    },
+    [showToast]
+  );
+
+  // Periodically remove schedules whose calendar time has passed + refresh system calendar
+  useEffect(() => {
+    const pruneNow = () => {
+      const res = pruneExpiredSchedules(remindersRef.current, Date.now());
+      if (res.changed) {
+        remindersRef.current = res.items;
+        setReminders(res.items);
+        res.removedIds.forEach((id) => {
+          void cancelLocalDeviceNotification(id);
+        });
+      }
+    };
+
+    pruneNow();
+    void syncSystemCalendarSchedules(true);
+
+    const expireTimer = window.setInterval(pruneNow, 30_000);
+    const calendarTimer = window.setInterval(() => {
+      void syncSystemCalendarSchedules(true);
+    }, 5 * 60_000);
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        pruneNow();
+        void syncSystemCalendarSchedules(true);
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+
+    return () => {
+      window.clearInterval(expireTimer);
+      window.clearInterval(calendarTimer);
+      document.removeEventListener('visibilitychange', onVisibility);
+    };
+  }, [syncSystemCalendarSchedules]);
+
+  // Automatically schedule / update / cancel Android status-bar notifications for active timed reminders & schedules
+  useEffect(() => {
+    if (!hasNativeDeviceBridge()) return;
+    const now = Date.now();
+    const desired = new Map<
+      string,
+      { sig: string; title: string; body: string; triggerAtMs: number }
+    >();
+
+    for (const item of reminders) {
+      if (item.completed || !item.startAtMs || item.startAtMs <= now) continue;
+      // Calendar events alert 10 minutes before start when >12 min away; reminders alert right on time
+      const leadMs =
+        item.source === 'calendar' && item.startAtMs - now > 12 * 60_000 ? 10 * 60_000 : 0;
+      const triggerAtMs = Math.max(now + 2000, item.startAtMs - leadMs);
+      const title = item.source === 'calendar' ? '日程提醒' : 'Relay 提醒';
+      const body = `${item.title} · ${item.dueLabel}${item.location ? ` @ ${item.location}` : ''}`;
+      const sig = `${title}|${body}|${triggerAtMs}`;
+      desired.set(item.id, { sig, title, body, triggerAtMs });
+    }
+
+    // Cancel any previously scheduled notifications that are no longer active
+    for (const prevId of Array.from(scheduledNotifKeysRef.current.keys())) {
+      if (!desired.has(prevId)) {
+        scheduledNotifKeysRef.current.delete(prevId);
+        void cancelLocalDeviceNotification(prevId);
+      }
+    }
+
+    // Schedule or reschedule changed items
+    for (const [id, spec] of desired.entries()) {
+      if (scheduledNotifKeysRef.current.get(id) !== spec.sig) {
+        scheduledNotifKeysRef.current.set(id, spec.sig);
+        void scheduleLocalDeviceNotification({
+          id,
+          title: spec.title,
+          body: spec.body,
+          triggerAtMs: spec.triggerAtMs,
+          channel: 'reminders',
+        });
+      }
+    }
+  }, [reminders]);
+
+  // Silent phone permission executor: only pops up a confirmation dialog for sensitive data
+  const runDeviceActionWithSensitivityGate = useCallback(
+    async (action: DeviceActionItem, skipPreCheck = false) => {
+      if (!skipPreCheck) {
+        const preCheck = assessDeviceActionSensitivity(action);
+        if (preCheck.sensitive) {
+          setSensitiveConfirmQueue((prev) => [
+            ...prev,
+            {
+              id: `sens-pre-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+              stage: 'pre-action',
+              action,
+              reason: preCheck.reason,
+            },
+          ]);
+          return;
+        }
+      }
+
+      try {
+        const res = await executeDeviceAction(action);
+        if (action.action === 'add_calendar_event') {
+          void syncSystemCalendarSchedules(true);
+        }
+
+        if (res.replyToAgent) {
+          if (!skipPreCheck) {
+            const contentCheck = detectSensitiveContent(res.replyToAgent);
+            if (contentCheck.sensitive) {
+              setSensitiveConfirmQueue((prev) => [
+                ...prev,
+                {
+                  id: `sens-post-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+                  stage: 'post-read',
+                  action,
+                  reason: contentCheck.reason,
+                  maskedPreview: contentCheck.maskedPreview,
+                  pendingReplyToAgent: res.replyToAgent,
+                },
+              ]);
+              return;
+            }
+          }
+          void sendMessageRef.current(res.replyToAgent);
+        } else if (res.resultText) {
+          showToast(res.resultText);
+        }
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : '手机能力执行失败';
+        showToast(reason);
+      }
+    },
+    [showToast, syncSystemCalendarSchedules]
+  );
+
+  const handleResolveSensitiveConfirm = useCallback(
+    async (allow: boolean) => {
+      const current = sensitiveConfirmQueue[0];
+      if (!current) return;
+      setSensitiveConfirmQueue((prev) => prev.slice(1));
+
+      if (!allow) {
+        showToast('已拒绝获取敏感数据');
+        return;
+      }
+
+      if (current.stage === 'post-read') {
+        if (current.pendingReplyToAgent) {
+          void sendMessageRef.current(current.pendingReplyToAgent);
+        }
+        return;
+      }
+
+      await runDeviceActionWithSensitivityGate(current.action, true);
+    },
+    [sensitiveConfirmQueue, showToast, runDeviceActionWithSensitivityGate]
+  );
 
   const updateSessionMessages = useCallback(
     (sessionId: string, updater: (prev: ChatMessage[]) => ChatMessage[]) => {
@@ -792,12 +1043,19 @@ export default function App() {
       }
 
       let appliedTurnSync = false;
+      let dispatchedDeviceActions = false;
 
       await streamAgentReply(
         promptToSend,
         nextHistory,
         effectiveConfig,
         (chunk) => {
+          // Hide ordinary device-action permission cards in chat (they execute silently;
+          // only genuinely sensitive data triggers a confirmation dialog)
+          const visibleCards = chunk.cards
+            ? chunk.cards.filter((c) => c.type !== 'device-action')
+            : undefined;
+
           updateSessionMessages(currentSessionId, (prev) =>
             prev.map((m) =>
               m.id === assistantId
@@ -807,13 +1065,31 @@ export default function App() {
                     thinking: chunk.thinking ?? m.thinking,
                     toolSteps: chunk.toolSteps ?? m.toolSteps,
                     elapsedMs: chunk.elapsedMs ?? m.elapsedMs,
-                    cards: chunk.cards ?? m.cards,
+                    cards: visibleCards ?? m.cards,
                     attachments: chunk.attachments ?? m.attachments,
                     streaming: !chunk.done,
                   }
                 : m
             )
           );
+
+          // Silently run non-sensitive phone actions once the assistant reply finishes
+          if (chunk.done && !dispatchedDeviceActions && chunk.cards?.length) {
+            const devActions = chunk.cards
+              .filter(
+                (c): c is Extract<InteractiveCard, { type: 'device-action' }> =>
+                  c.type === 'device-action'
+              )
+              .map((c) => c.data);
+            if (devActions.length > 0) {
+              dispatchedDeviceActions = true;
+              void (async () => {
+                for (const act of devActions) {
+                  await runDeviceActionWithSensitivityGate(act, false);
+                }
+              })();
+            }
+          }
 
           // Automatically push Agent-emitted briefings, reminders, goals, and relay-sync updates into the App
           if (
@@ -842,6 +1118,10 @@ export default function App() {
               setReminders(applied.nextReminders);
               setGoals(applied.nextGoals);
               setHealthLog(applied.nextHealthLog);
+              // Cancel Android notifications for any reminders deleted/completed/expired by the cloud agent
+              applied.deletedReminderIds.forEach((id) => {
+                void cancelLocalDeviceNotification(id);
+              });
               // Record ingested card IDs so remote history reloads won't resurrect deleted items
               (chunk.cards ?? []).forEach((c) => {
                 if (c.type === 'briefing' || c.type === 'reminder' || c.type === 'goal') {
@@ -857,7 +1137,32 @@ export default function App() {
                 // ignore
               }
               const msg = formatSyncToast(applied.summary);
-              if (msg) showToast(msg);
+              if (msg) {
+                showToast(msg);
+                // Also surface an Android status-bar notification when cloud Agent pushes/updates reminders
+                if (
+                  (applied.addedReminderItems.length > 0 ||
+                    applied.updatedReminderItems.length > 0 ||
+                    applied.summary.deletedReminders > 0) &&
+                  hasNativeDeviceBridge()
+                ) {
+                  void getDevicePermissions().then((perms) => {
+                    if (perms.postNotifications) {
+                      const firstItem =
+                        applied.addedReminderItems[0] || applied.updatedReminderItems[0];
+                      const body = firstItem
+                        ? `${firstItem.title} · ${firstItem.dueLabel}`
+                        : msg;
+                      void sendLocalDeviceNotification({
+                        id: `agent-sync-${Date.now()}`,
+                        title: 'Relay 提醒已同步',
+                        body,
+                        channel: 'updates',
+                      });
+                    }
+                  });
+                }
+              }
             }
           }
         },
@@ -900,6 +1205,7 @@ export default function App() {
       abortRef.current = null;
     }
   };
+  sendMessageRef.current = handleSendMessage;
 
   // Optional manual sync trigger (automatic reading already happens on every message)
   const handleManualSyncStateWithAgent = () => {
@@ -1079,20 +1385,30 @@ export default function App() {
   // Health handlers
   const handleScheduleBedtimeReminder = () => {
     const title = `准备入睡（目标 ${healthConfig.sleepGoalHours}h 睡眠，${healthConfig.wakeTarget} 起床）`;
-    setReminders((prev) => [
-      {
-        id: `rem-sleep-${Date.now()}`,
-        title,
-        dueLabel: `今天 ${healthConfig.bedtimeTarget}`,
-        dayGroup: 'today',
-        repeat: '每天',
-        priority: 'high',
-        channel: 'ntfy',
-        completed: false,
-      },
-      ...prev,
-    ]);
-    showToast(`已生成 ${healthConfig.bedtimeTarget} 就寝提醒`);
+    const timing = parseScheduleTiming({
+      dueLabel: `今天 ${healthConfig.bedtimeTarget}`,
+      dayGroup: 'today',
+    });
+    setReminders((prev) =>
+      pruneExpiredSchedules([
+        {
+          id: `rem-sleep-${Date.now()}`,
+          title,
+          dueLabel: timing.dueLabel,
+          dayGroup: timing.dayGroup,
+          startAtMs: timing.startAtMs,
+          endAtMs: timing.endAtMs,
+          repeat: '每天',
+          priority: 'high',
+          channel: 'app',
+          completed: false,
+          source: 'reminder',
+          origin: 'user',
+        },
+        ...prev,
+      ]).items
+    );
+    showToast(`已生成 ${healthConfig.bedtimeTarget} 就寝通知栏提醒`);
   };
 
   const handleAskAgentHealthCheck = () => {
@@ -1231,7 +1547,14 @@ export default function App() {
   // Reminders handlers
   const handleToggleReminderById = (id: string) => {
     setReminders((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, completed: !r.completed } : r))
+      prev.map((r) => {
+        if (r.id !== id) return r;
+        const nextCompleted = !r.completed;
+        if (nextCompleted) {
+          void cancelLocalDeviceNotification(id);
+        }
+        return { ...r, completed: nextCompleted };
+      })
     );
     updateSessionMessages(activeSession.id, (prev) =>
       prev.map((m) => ({
@@ -1246,15 +1569,44 @@ export default function App() {
   };
 
   const handleSnoozeReminderById = (id: string) => {
+    const now = Date.now();
+    const snoozeMs = 30 * 60_000;
+    let nextLabelForCard = '';
     setReminders((prev) =>
-      prev.map((r) => (r.id === id ? { ...r, dueLabel: `${r.dueLabel}（已延后 30m）` } : r))
+      prev.map((r) => {
+        if (r.id !== id) return r;
+        const baseStart =
+          r.startAtMs && r.startAtMs > now ? r.startAtMs + snoozeMs : now + snoozeMs;
+        const duration =
+          r.startAtMs && r.endAtMs && r.endAtMs > r.startAtMs ? r.endAtMs - r.startAtMs : 0;
+        const nextEnd = duration > 0 ? baseStart + duration : undefined;
+        const timing = parseScheduleTiming({
+          startAtMs: baseStart,
+          endAtMs: nextEnd,
+          allDay: false,
+        });
+        nextLabelForCard = timing.dueLabel;
+        return {
+          ...r,
+          startAtMs: timing.startAtMs,
+          endAtMs: timing.endAtMs,
+          dayGroup: timing.dayGroup,
+          dueLabel: timing.dueLabel,
+        };
+      })
     );
     updateSessionMessages(activeSession.id, (prev) =>
       prev.map((m) => ({
         ...m,
         cards: m.cards?.map((c) =>
           c.type === 'reminder' && c.data.id === id
-            ? { ...c, data: { ...c.data, dueLabel: `${c.data.dueLabel}（已延后 30m）` } }
+            ? {
+                ...c,
+                data: {
+                  ...c.data,
+                  dueLabel: nextLabelForCard || `${c.data.dueLabel}（已延后 30m）`,
+                },
+              }
             : c
         ),
       }))
@@ -1263,21 +1615,55 @@ export default function App() {
   };
 
   const handleSyncReminderFromCard = (item: ReminderItem) => {
+    const timing = parseScheduleTiming({
+      startAtMs: item.startAtMs,
+      endAtMs: item.endAtMs,
+      dueLabel: item.dueLabel,
+      dayGroup: item.dayGroup,
+      allDay: item.allDay,
+    });
     setReminders((prev) => {
       if (prev.some((r) => r.id === item.id)) return prev;
-      return [item, ...prev];
+      return pruneExpiredSchedules([
+        {
+          ...item,
+          dueLabel: timing.dueLabel,
+          dayGroup: timing.dayGroup,
+          startAtMs: timing.startAtMs,
+          endAtMs: timing.endAtMs,
+          allDay: timing.allDay,
+        },
+        ...prev,
+      ]).items;
     });
-    showToast('已同步到「目标」日程提醒');
+    showToast('已同步到「日程」并安排通知栏提醒');
   };
 
   const handleAddReminder = (item: Omit<ReminderItem, 'id' | 'completed'>) => {
-    setReminders((prev) => [
-      { ...item, id: `rem-${Date.now()}`, completed: false },
-      ...prev,
-    ]);
+    const timing = parseScheduleTiming({
+      startAtMs: item.startAtMs,
+      endAtMs: item.endAtMs,
+      dueLabel: item.dueLabel,
+      dayGroup: item.dayGroup,
+      allDay: item.allDay,
+    });
+    const created: ReminderItem = {
+      ...item,
+      id: `rem-${Date.now()}`,
+      completed: false,
+      dueLabel: timing.dueLabel,
+      dayGroup: timing.dayGroup,
+      startAtMs: timing.startAtMs,
+      endAtMs: timing.endAtMs,
+      allDay: timing.allDay,
+      source: item.source || 'reminder',
+      origin: item.origin || 'user',
+    };
+    setReminders((prev) => pruneExpiredSchedules([created, ...prev]).items);
   };
 
   const handleDeleteReminder = (id: string) => {
+    void cancelLocalDeviceNotification(id);
     setReminders((prev) => prev.filter((r) => r.id !== id));
     showToast('已删除该提醒');
   };
@@ -1924,9 +2310,11 @@ export default function App() {
             config={config}
             agentProfile={agentProfile}
             isVoiceActive={isInPlaceVoiceActive}
+            isSyncingCalendar={isSyncingCalendar}
             onOpenDrawer={() => setDrawerOpen(true)}
             onTapAvatar={handleTapAvatarInPlace}
             onSyncStateWithAgent={handleManualSyncStateWithAgent}
+            onSyncCalendar={() => void syncSystemCalendarSchedules(false)}
             onAddGoal={handleAddGoal}
             onToggleMilestone={handleToggleMilestone}
             onReorderGoals={setGoals}
@@ -2097,6 +2485,74 @@ export default function App() {
 
       {/* Offline Status Toast */}
       <OfflineIndicator />
+
+      {/* Sensitive Data Confirmation Dialog (ONLY triggered for payment/password/OTP/sensitive content) */}
+      <AnimatePresence>
+        {activeSensitiveConfirm && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => void handleResolveSensitiveConfirm(false)}
+            className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-3 backdrop-blur-xs sm:items-center"
+          >
+            <motion.div
+              initial={{ y: 20, opacity: 0, scale: 0.98 }}
+              animate={{ y: 0, opacity: 1, scale: 1 }}
+              exit={{ y: 16, opacity: 0, scale: 0.98 }}
+              transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+              onClick={(e) => e.stopPropagation()}
+              className="mac-card w-full max-w-sm rounded-[28px] p-5 text-[var(--relay-text)] space-y-4"
+            >
+              <div className="flex items-start gap-3">
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-amber-50 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400">
+                  <ShieldAlert className="h-5 w-5" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h3 className="text-[15px] font-semibold text-[var(--relay-text)]">
+                    敏感数据访问确认
+                  </h3>
+                  <p className="mt-1 text-xs leading-relaxed text-[var(--relay-text-muted)]">
+                    {activeSensitiveConfirm.reason}
+                  </p>
+                </div>
+              </div>
+
+              <div className="rounded-2xl border border-black/[0.07] bg-zinc-50 px-3.5 py-2.5 text-xs dark:border-white/10 dark:bg-zinc-900">
+                <div className="font-medium text-[var(--relay-text)]">
+                  {activeSensitiveConfirm.action.title || activeSensitiveConfirm.action.action}
+                </div>
+                {activeSensitiveConfirm.maskedPreview ? (
+                  <p className="mt-1.5 whitespace-pre-wrap break-all font-mono-tabular text-[11px] leading-relaxed text-[var(--relay-text-muted)]">
+                    {activeSensitiveConfirm.maskedPreview}
+                  </p>
+                ) : activeSensitiveConfirm.action.summary ? (
+                  <p className="mt-1 text-[11px] text-[var(--relay-text-muted)]">
+                    {activeSensitiveConfirm.action.summary}
+                  </p>
+                ) : null}
+              </div>
+
+              <div className="flex items-center gap-2 pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => void handleResolveSensitiveConfirm(false)}
+                  className="flex h-10 flex-1 items-center justify-center rounded-full border border-black/[0.09] bg-white text-xs font-medium text-[var(--relay-text)] transition-colors hover:bg-zinc-50 dark:border-white/12 dark:bg-zinc-900 dark:hover:bg-zinc-800"
+                >
+                  拒绝
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleResolveSensitiveConfirm(true)}
+                  className="flex h-10 flex-1 items-center justify-center rounded-full bg-zinc-950 text-xs font-semibold text-white transition-colors hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-950"
+                >
+                  仅本次允许
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Action Feedback Toast */}
       <AnimatePresence>

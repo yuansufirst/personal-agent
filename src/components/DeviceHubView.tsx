@@ -38,6 +38,7 @@ import {
   readDeviceClipboard,
   readDeviceFileText,
   requestDevicePermission,
+  sendLocalDeviceNotification,
   setDeviceAlarm,
   setDeviceTimer,
   writeDeviceClipboard,
@@ -85,6 +86,7 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
     calendar: false,
     alarm: isNative,
     notifications: false,
+    postNotifications: false,
     sms: false,
     location: false,
     files: false,
@@ -665,6 +667,35 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
             <div className="flex flex-wrap items-center gap-2">
               <button
                 type="button"
+                onClick={() => void handleRequestPerm('postNotifications')}
+                className={`min-h-[34px] rounded-xl px-3 text-xs font-medium ${
+                  perms.postNotifications
+                    ? 'border border-emerald-200 bg-emerald-50 text-emerald-700 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-400'
+                    : 'bg-zinc-950 text-white hover:bg-zinc-800 dark:bg-[#1B6EF3]'
+                }`}
+              >
+                {perms.postNotifications ? '通知栏提醒已开启' : '开启通知栏提醒'}
+              </button>
+              <button
+                type="button"
+                onClick={async () => {
+                  const res = await sendLocalDeviceNotification({
+                    id: `test-${Date.now()}`,
+                    title: 'Relay 通知栏提醒',
+                    body: '之后的日程、提醒和云端助理更新都会直接发到这里。',
+                    channel: 'reminders',
+                  });
+                  onShowToast(res.detail);
+                  if (res.ok) {
+                    setPerms((prev) => ({ ...prev, postNotifications: true }));
+                  }
+                }}
+                className="min-h-[34px] rounded-xl border border-stone-200 bg-white px-3 text-xs font-medium text-zinc-700 hover:bg-stone-50 dark:border-zinc-700 dark:bg-[#181A20] dark:text-zinc-200"
+              >
+                测试通知栏
+              </button>
+              <button
+                type="button"
                 onClick={() => void handleRequestPerm('notifications')}
                 className={`min-h-[34px] rounded-xl px-3 text-xs font-medium ${
                   perms.notifications
@@ -672,7 +703,7 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
                     : 'bg-[#1B6EF3] text-white hover:bg-blue-600'
                 }`}
               >
-                {perms.notifications ? '通知使用权已开启' : '去开启通知使用权'}
+                {perms.notifications ? '通知读取已开启' : '开启通知读取'}
               </button>
               <button
                 type="button"
@@ -981,7 +1012,7 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
           </div>
         </div>
         <p className="text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-          点击「一键教给云端助理」后，你的 DSH Agent 在回复中输出 <code className="rounded bg-stone-100 px-1 py-0.5 font-mono-tabular text-[11px] dark:bg-zinc-800">```relay-action```</code> 即可在对话里渲染原生执行卡片，一键为你设闹钟、写系统日历、写入剪贴板、保存文件，或请求回传通知/短信/定位。
+          点击「一键教给云端助理」后，云端 Agent 输出 <code className="rounded bg-stone-100 px-1 py-0.5 font-mono-tabular text-[11px] dark:bg-zinc-800">```relay-action```</code> 会静默执行普通手机权限（闹钟、日历、通知栏、剪贴板、定位等），仅在涉及支付、密码、银行卡或验证码等敏感数据时弹出确认窗口。
         </p>
       </div>
     </div>

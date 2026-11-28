@@ -316,7 +316,7 @@ export const InteractiveCardRenderer: React.FC<InteractiveCardRendererProps> = (
                   ? 'ntfy 推送'
                   : item.channel === 'browser'
                     ? '浏览器通知'
-                    : '应用内'}
+                    : '通知栏提醒'}
               </span>
             </div>
             <h4
@@ -472,7 +472,7 @@ export const InteractiveCardRenderer: React.FC<InteractiveCardRendererProps> = (
             ? Clipboard
             : item.action === 'get_location'
               ? MapPin
-              : item.action === 'read_notifications'
+              : item.action === 'read_notifications' || item.action === 'send_notification'
                 ? Bell
                 : item.action === 'save_file' || item.action === 'list_files'
                   ? FolderOpen

@@ -3,6 +3,9 @@ package com.relay.agent;
 import android.Manifest;
 import android.annotation.SuppressLint;
 import android.app.Activity;
+import android.app.AlarmManager;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.ContentResolver;
@@ -97,6 +100,12 @@ import java.util.concurrent.Executors;
                 Manifest.permission.ACCESS_FINE_LOCATION,
                 Manifest.permission.ACCESS_COARSE_LOCATION
             }
+        ),
+        @Permission(
+            alias = "postNotifications",
+            strings = {
+                Manifest.permission.POST_NOTIFICATIONS
+            }
         )
     }
 )
@@ -118,6 +127,7 @@ public class DeviceBridgePlugin extends Plugin {
         status.put("sms", getPermissionState("sms") == PermissionState.GRANTED);
         status.put("location", getPermissionState("location") == PermissionState.GRANTED);
         status.put("notifications", RelayNotificationListenerService.isEnabled(getContext()));
+        status.put("postNotifications", RelayReminderReceiver.canPostNotifications(getContext()));
         status.put("clipboard", true);
         status.put("alarm", true);
         status.put("time", true);
@@ -133,6 +143,18 @@ public class DeviceBridgePlugin extends Plugin {
         String capability = call.getString("capability", "");
         if ("notifications".equals(capability)) {
             openNotificationSettingsInternal(call);
+            return;
+        }
+        if ("postNotifications".equals(capability)) {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU
+                || RelayReminderReceiver.canPostNotifications(getContext())) {
+                JSObject out = new JSObject();
+                out.put("granted", RelayReminderReceiver.canPostNotifications(getContext()));
+                out.put("capability", capability);
+                call.resolve(out);
+                return;
+            }
+            requestPermissionForAlias("postNotifications", call, "onCapabilityPermissionResult");
             return;
         }
         if ("files".equals(capability)) {
@@ -160,7 +182,9 @@ public class DeviceBridgePlugin extends Plugin {
     private void onCapabilityPermissionResult(PluginCall call) {
         String capability = call.getString("capability", "");
         boolean granted = false;
-        if ("calendar".equals(capability) || "sms".equals(capability) || "location".equals(capability)) {
+        if ("postNotifications".equals(capability)) {
+            granted = RelayReminderReceiver.canPostNotifications(getContext());
+        } else if ("calendar".equals(capability) || "sms".equals(capability) || "location".equals(capability)) {
             granted = getPermissionState(capability) == PermissionState.GRANTED;
         }
         JSObject out = new JSObject();
@@ -317,15 +341,21 @@ public class DeviceBridgePlugin extends Plugin {
     private void readCalendarEventsInternal(PluginCall call) {
         int daysAhead = call.getInt("daysAhead", 7);
         int limit = call.getInt("limit", 30);
+        boolean upcomingOnly = Boolean.TRUE.equals(call.getBoolean("upcomingOnly", false));
         ioExecutor.execute(() -> {
             JSArray items = new JSArray();
             long now = System.currentTimeMillis();
-            // Start from beginning of today so earlier today's events are visible too
-            Calendar startCal = Calendar.getInstance();
-            startCal.set(Calendar.HOUR_OF_DAY, 0);
-            startCal.set(Calendar.MINUTE, 0);
-            startCal.set(Calendar.SECOND, 0);
-            long startMs = startCal.getTimeInMillis();
+            long startMs;
+            if (upcomingOnly) {
+                startMs = now;
+            } else {
+                // Start from beginning of today so earlier today's events are visible too
+                Calendar startCal = Calendar.getInstance();
+                startCal.set(Calendar.HOUR_OF_DAY, 0);
+                startCal.set(Calendar.MINUTE, 0);
+                startCal.set(Calendar.SECOND, 0);
+                startMs = startCal.getTimeInMillis();
+            }
             long endMs = now + (long) Math.max(1, Math.min(daysAhead, 60)) * 24L * 3600L * 1000L;
 
             String[] projection = new String[] {
@@ -348,13 +378,18 @@ public class DeviceBridgePlugin extends Plugin {
                 List<JSObject> list = new ArrayList<>();
                 if (cursor != null) {
                     while (cursor.moveToNext()) {
+                        long evStart = cursor.getLong(4);
+                        long evEnd = cursor.getLong(5);
+                        if (upcomingOnly && evEnd > 0 && evEnd <= now) {
+                            continue;
+                        }
                         JSObject obj = new JSObject();
                         obj.put("id", String.valueOf(cursor.getLong(0)));
                         obj.put("title", safeStr(cursor.getString(1)));
                         obj.put("description", safeStr(cursor.getString(2)));
                         obj.put("location", safeStr(cursor.getString(3)));
-                        obj.put("startMs", cursor.getLong(4));
-                        obj.put("endMs", cursor.getLong(5));
+                        obj.put("startMs", evStart);
+                        obj.put("endMs", evEnd);
                         obj.put("allDay", cursor.getInt(6) == 1);
                         obj.put("calendarName", safeStr(cursor.getString(7)));
                         list.add(obj);
@@ -719,6 +754,178 @@ public class DeviceBridgePlugin extends Plugin {
                 call.reject("无法打开通知使用权设置页：" + e.getMessage());
             }
         });
+    }
+
+    // -------------------------------------------------------------------------
+    // 7b. Local Android Status-Bar Notifications (Immediate & Scheduled)
+    // -------------------------------------------------------------------------
+
+    private int stableNotifId(String rawId) {
+        if (rawId == null || rawId.trim().isEmpty()) {
+            return (int) (System.currentTimeMillis() & 0x7fffffff);
+        }
+        int h = rawId.trim().hashCode();
+        return h == Integer.MIN_VALUE ? 100001 : Math.abs(h);
+    }
+
+    @PluginMethod
+    public void sendLocalNotification(PluginCall call) {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && !RelayReminderReceiver.canPostNotifications(getContext())) {
+                requestPermissionForAlias("postNotifications", call, "onSendLocalNotificationPermission");
+                return;
+            }
+            postLocalNotificationInternal(call);
+        } catch (Throwable t) {
+            call.reject("发送通知失败：" + t.getMessage());
+        }
+    }
+
+    @PermissionCallback
+    private void onSendLocalNotificationPermission(PluginCall call) {
+        if (RelayReminderReceiver.canPostNotifications(getContext())) {
+            postLocalNotificationInternal(call);
+        } else {
+            call.reject("未授予通知栏提醒权限，请在系统设置中允许 Relay 发送通知");
+        }
+    }
+
+    private void postLocalNotificationInternal(PluginCall call) {
+        try {
+            String rawId = call.getString("id", "");
+            String title = call.getString("title", "Relay 提醒");
+            String body = call.getString("body", "");
+            String channel = call.getString("channel", RelayReminderReceiver.CHANNEL_REMINDERS);
+            int notifId = stableNotifId(rawId);
+
+            boolean posted = RelayReminderReceiver.showNotification(
+                getContext(),
+                notifId,
+                title,
+                body,
+                channel
+            );
+            JSObject out = new JSObject();
+            out.put("ok", posted);
+            out.put("notifId", notifId);
+            call.resolve(out);
+        } catch (Throwable t) {
+            call.reject("发送通知失败：" + t.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void scheduleLocalNotification(PluginCall call) {
+        try {
+            String rawId = call.getString("id", "");
+            String title = call.getString("title", "Relay 提醒");
+            String body = call.getString("body", "");
+            String channel = call.getString("channel", RelayReminderReceiver.CHANNEL_REMINDERS);
+            long triggerAtMs = call.getData().optLong("triggerAtMs", 0L);
+
+            if (triggerAtMs <= 0L) {
+                call.reject("缺少有效的定时提醒时间");
+                return;
+            }
+
+            Context ctx = getContext();
+            RelayReminderReceiver.ensureChannels(ctx);
+            int notifId = stableNotifId(rawId);
+            long now = System.currentTimeMillis();
+
+            if (triggerAtMs <= now + 3000L) {
+                boolean posted = RelayReminderReceiver.showNotification(ctx, notifId, title, body, channel);
+                JSObject out = new JSObject();
+                out.put("ok", posted);
+                out.put("notifId", notifId);
+                out.put("mode", "immediate");
+                call.resolve(out);
+                return;
+            }
+
+            AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+            if (am == null) {
+                call.reject("系统不支持定时提醒服务");
+                return;
+            }
+
+            Intent intent = new Intent(ctx, RelayReminderReceiver.class);
+            intent.setAction(RelayReminderReceiver.ACTION_REMINDER_NOTIFY);
+            intent.putExtra(RelayReminderReceiver.EXTRA_NOTIF_ID, notifId);
+            intent.putExtra(RelayReminderReceiver.EXTRA_TITLE, title);
+            intent.putExtra(RelayReminderReceiver.EXTRA_BODY, body);
+            intent.putExtra(RelayReminderReceiver.EXTRA_CHANNEL, channel);
+
+            int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                flags |= PendingIntent.FLAG_IMMUTABLE;
+            }
+            PendingIntent pi = PendingIntent.getBroadcast(ctx, notifId, intent, flags);
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                if (am.canScheduleExactAlarms()) {
+                    am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMs, pi);
+                } else {
+                    am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMs, pi);
+                }
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, triggerAtMs, pi);
+            } else {
+                am.set(AlarmManager.RTC_WAKEUP, triggerAtMs, pi);
+            }
+
+            JSObject out = new JSObject();
+            out.put("ok", true);
+            out.put("notifId", notifId);
+            out.put("mode", "scheduled");
+            out.put("triggerAtMs", triggerAtMs);
+            call.resolve(out);
+        } catch (Throwable t) {
+            call.reject("定时通知安排失败：" + t.getMessage());
+        }
+    }
+
+    @PluginMethod
+    public void cancelLocalNotification(PluginCall call) {
+        try {
+            String rawId = call.getString("id", "");
+            if (rawId == null || rawId.trim().isEmpty()) {
+                JSObject out = new JSObject();
+                out.put("ok", true);
+                call.resolve(out);
+                return;
+            }
+            Context ctx = getContext();
+            int notifId = stableNotifId(rawId);
+
+            AlarmManager am = (AlarmManager) ctx.getSystemService(Context.ALARM_SERVICE);
+            if (am != null) {
+                Intent intent = new Intent(ctx, RelayReminderReceiver.class);
+                intent.setAction(RelayReminderReceiver.ACTION_REMINDER_NOTIFY);
+                int flags = PendingIntent.FLAG_NO_CREATE;
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    flags |= PendingIntent.FLAG_IMMUTABLE;
+                }
+                PendingIntent pi = PendingIntent.getBroadcast(ctx, notifId, intent, flags);
+                if (pi != null) {
+                    am.cancel(pi);
+                    pi.cancel();
+                }
+            }
+
+            NotificationManager nm = (NotificationManager) ctx.getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) {
+                nm.cancel(notifId);
+            }
+
+            JSObject out = new JSObject();
+            out.put("ok", true);
+            out.put("notifId", notifId);
+            call.resolve(out);
+        } catch (Throwable t) {
+            call.reject("取消通知失败：" + t.getMessage());
+        }
     }
 
     // -------------------------------------------------------------------------
