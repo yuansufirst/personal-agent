@@ -338,7 +338,7 @@ export const InteractiveMapCard: React.FC<InteractiveMapCardProps> = ({
         </div>
 
         {item.routeSummary && (
-          <div className="flex items-center gap-2 rounded-xl border border-white/10 bg-black/25 px-3 py-2 text-xs text-[var(--relay-text)]">
+          <div className="flex items-center gap-2 rounded-xl border border-black/[0.07] bg-zinc-50 px-3 py-2 text-xs text-[var(--relay-text)] dark:border-white/10 dark:bg-zinc-900">
             <Route className="h-3.5 w-3.5 shrink-0 text-[var(--accent-sky)]" />
             <span className="leading-snug">{item.routeSummary}</span>
           </div>
@@ -353,7 +353,7 @@ export const InteractiveMapCard: React.FC<InteractiveMapCardProps> = ({
             {item.highlights.map((tag, idx) => (
               <span
                 key={idx}
-                className="rounded-lg border border-white/10 bg-white/6 px-2 py-0.5 text-[11px] text-[var(--relay-text-muted)]"
+                className="rounded-lg border border-black/[0.07] bg-zinc-50 px-2 py-0.5 text-[11px] text-[var(--relay-text-muted)] dark:border-white/10 dark:bg-white/6"
               >
                 {tag}
               </span>
@@ -361,12 +361,12 @@ export const InteractiveMapCard: React.FC<InteractiveMapCardProps> = ({
           </div>
         )}
 
-        <div className="flex flex-wrap items-center gap-2 border-t border-white/10 pt-3">
+        <div className="flex flex-wrap items-center gap-2 border-t border-[var(--relay-tile-border)] pt-3">
           <a
             href={amapUrl}
             target="_blank"
             rel="noopener noreferrer"
-            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-sky-500/90 px-3.5 py-2 text-xs font-medium text-slate-950 transition-colors hover:bg-sky-400 whitespace-nowrap shrink-0"
+            className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl bg-sky-600 px-3.5 py-2 text-xs font-medium text-white transition-colors hover:bg-sky-500 whitespace-nowrap shrink-0"
           >
             <Navigation className="h-3.5 w-3.5" />
             <span>高德导航</span>
@@ -376,7 +376,7 @@ export const InteractiveMapCard: React.FC<InteractiveMapCardProps> = ({
             <button
               type="button"
               onClick={() => onAskAboutMap(item)}
-              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-white/15 bg-white/8 px-3.5 py-2 text-xs font-medium text-[var(--relay-text)] transition-colors hover:bg-white/14 whitespace-nowrap shrink-0"
+              className="inline-flex min-h-[38px] items-center gap-1.5 rounded-xl border border-black/[0.09] bg-zinc-50 px-3.5 py-2 text-xs font-medium text-[var(--relay-text)] transition-colors hover:bg-zinc-100 whitespace-nowrap shrink-0 dark:border-white/15 dark:bg-white/8 dark:hover:bg-white/14"
             >
               <MessageSquarePlus className="h-3.5 w-3.5" />
               <span>换路线 / 查周边</span>

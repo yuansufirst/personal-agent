@@ -1,20 +1,17 @@
 import React, { useRef, useState } from 'react';
 import {
-  ArrowUpRight,
-  Bookmark,
   Check,
   Edit3,
   ExternalLink,
-  FileText,
   Laptop,
   Link2,
-  RefreshCw,
   Server,
   Smartphone,
   Upload,
   X,
 } from 'lucide-react';
 import type {
+  AgentProfile,
   BriefingItem,
   ConnectionConfig,
   DeviceContextConfig,
@@ -23,9 +20,24 @@ import type {
   QuickMacro,
 } from '../types/relay';
 import { DeviceHubView } from './DeviceHubView';
+import { MuseAvatarHeader } from './MuseAvatarHeader';
+import {
+  ArrowUpRight,
+  ArrowsClockwise,
+  ComposerDeviceIcon,
+  FeedBookmarkIcon,
+  FileText,
+  SpaceArchiveIcon,
+  SpaceCloudIcon,
+  SpaceDevicesIcon,
+} from './AppIcons';
 
 interface SpaceViewProps {
   config: ConnectionConfig;
+  agentProfile?: AgentProfile;
+  isVoiceActive?: boolean;
+  onOpenDrawer?: () => void;
+  onTapAvatar?: () => void;
   initialSubTab?: 'device' | 'environment' | 'library';
   deviceContextConfig: DeviceContextConfig;
   nodes: MeshNode[];
@@ -54,6 +66,10 @@ type SpaceTab = 'device' | 'environment' | 'library';
 
 export const SpaceView: React.FC<SpaceViewProps> = ({
   config,
+  agentProfile,
+  isVoiceActive = false,
+  onOpenDrawer,
+  onTapAvatar,
   initialSubTab = 'device',
   deviceContextConfig,
   nodes,
@@ -97,31 +113,41 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
   };
 
   return (
-    <div className="mx-auto w-full max-w-5xl px-4 py-5 pb-28 sm:px-6 lg:py-8 lg:pb-14 space-y-5">
-      {/* FLUSH BOARD HEADER */}
-      <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[var(--relay-tile-border)]/45 pb-4">
-        <h1 className="text-xl font-semibold tracking-tight text-[var(--relay-text)]">空间</h1>
+    <div className="mx-auto w-full max-w-5xl px-4 pt-3 pb-28 sm:px-6 lg:pt-7 lg:pb-14 space-y-5">
+      {/* Shared Muse Header — tapping circular AI avatar starts in-place voice */}
+      <MuseAvatarHeader
+        agentProfile={agentProfile}
+        isVoiceActive={isVoiceActive}
+        onOpenDrawer={onOpenDrawer}
+        onTapAvatar={onTapAvatar}
+      />
 
-        <div className="inline-flex items-center gap-1.5">
+      {/* Symbol-Led Sub-Tab Switcher */}
+      <div className="flex items-center justify-center">
+        <div className="inline-flex items-center gap-1 rounded-full border border-black/[0.07] bg-white p-1 shadow-xs dark:border-white/10 dark:bg-zinc-900">
           {(
             [
-              ['device', '手机', 'var(--tint-emerald)'],
-              ['environment', '设备', 'var(--tint-blue)'],
-              ['library', '归档', 'var(--tint-violet)'],
-            ] as [SpaceTab, string, string][]
-          ).map(([key, label, tint]) => (
+              { key: 'device', label: '手机', Icon: ComposerDeviceIcon },
+              { key: 'environment', label: '设备', Icon: SpaceDevicesIcon },
+              { key: 'library', label: '归档', Icon: SpaceArchiveIcon },
+            ] as {
+              key: SpaceTab;
+              label: string;
+              Icon: React.FC<{ className?: string }>;
+            }[]
+          ).map(({ key, label, Icon }) => (
             <button
               key={key}
               type="button"
               onClick={() => setSubTab(key)}
-              style={{ '--tile-tint': tint } as React.CSSProperties}
-              className={`min-h-[36px] rounded-xl px-3.5 text-xs font-medium transition-colors whitespace-nowrap ${
+              className={`inline-flex min-h-[34px] items-center gap-1.5 rounded-full px-3.5 text-xs font-medium transition-colors whitespace-nowrap ${
                 subTab === key
-                  ? 'mini-tile mini-tile-active text-[var(--relay-text)]'
+                  ? 'bg-zinc-900 text-white shadow-xs dark:bg-zinc-100 dark:text-zinc-950'
                   : 'text-[var(--relay-text-muted)] hover:text-[var(--relay-text)]'
               }`}
             >
-              {label}
+              <Icon className="h-3.5 w-3.5" />
+              <span>{label}</span>
             </button>
           ))}
         </div>
@@ -136,30 +162,30 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
         />
       ) : subTab === 'environment' ? (
         <div className="space-y-5">
-          {/* Active Agent Endpoint Tile (Cloudflare Tunnel) */}
-          <div
-            className="mini-tile flex flex-col gap-3 rounded-[22px] p-4 sm:flex-row sm:items-center sm:justify-between"
-            style={{ '--tile-tint': 'var(--tint-blue)' } as React.CSSProperties}
-          >
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2 text-[11px] font-medium text-[var(--relay-text-muted)]">
-                <span>手机 → 云端入口 · Cloudflare Tunnel</span>
-                <span className="text-white/25">·</span>
-                <span className="text-[var(--accent-sky)]">电脑互联 · Tailscale</span>
-              </div>
-              <div className="mt-1 truncate font-mono-tabular text-sm font-semibold text-[var(--relay-text)]">
-                {config.mode === 'sandbox'
-                  ? '本地体验模式'
-                  : config.serverUrl || '未配置 Cloudflare Tunnel 域名'}
+          {/* Active Agent Endpoint Tile */}
+          <div className="muse-card flex flex-col gap-3 rounded-[24px] p-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="flex min-w-0 items-center gap-3">
+              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-zinc-100 dark:bg-zinc-800">
+                <SpaceCloudIcon className="h-5 w-5" />
+              </span>
+              <div className="min-w-0">
+                <div className="text-[11px] font-medium text-[var(--relay-text-muted)]">
+                  Cloudflare Tunnel · Tailscale
+                </div>
+                <div className="mt-0.5 truncate font-mono-tabular text-sm font-semibold text-[var(--relay-text)]">
+                  {config.mode === 'sandbox'
+                    ? 'Sandbox'
+                    : config.serverUrl || '未配置'}
+                </div>
               </div>
             </div>
             <button
               type="button"
               onClick={onOpenConnection}
-              className="inline-flex min-h-[38px] shrink-0 items-center justify-center gap-1.5 rounded-xl border border-white/20 bg-white/12 px-3.5 text-xs font-medium text-[var(--relay-text)] hover:bg-white/20 whitespace-nowrap"
+              className="inline-flex min-h-[38px] shrink-0 items-center justify-center gap-1.5 rounded-full border border-black/[0.09] bg-zinc-50 px-3.5 text-xs font-medium text-[var(--relay-text)] hover:bg-zinc-100 whitespace-nowrap dark:border-white/15 dark:bg-white/10 dark:hover:bg-white/16"
             >
               <Link2 className="h-3.5 w-3.5 text-[var(--accent-sky)]" />
-              <span>通道设置</span>
+              <span>连接</span>
             </button>
           </div>
 
@@ -209,7 +235,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                   className="board-tile flex flex-col justify-between gap-2.5"
                 >
                   <div className="flex items-start justify-between gap-2">
-                    <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-white/10 text-[var(--relay-text)]">
+                    <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-zinc-100 text-[var(--relay-text)] dark:bg-white/10">
                       <Icon className="h-4 w-4" />
                     </div>
                     {!isEditing && canEditAddress && (
@@ -217,7 +243,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                         type="button"
                         onClick={() => startEdit(node)}
                         aria-label="编辑地址"
-                        className="flex h-8 w-8 items-center justify-center rounded-xl text-[var(--relay-text-muted)] hover:bg-white/10 hover:text-[var(--relay-text)]"
+                        className="flex h-8 w-8 items-center justify-center rounded-xl text-[var(--relay-text-muted)] hover:bg-black/[0.05] hover:text-[var(--relay-text)] dark:hover:bg-white/10"
                       >
                         <Edit3 className="h-3.5 w-3.5" />
                       </button>
@@ -243,13 +269,13 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                         value={ipDraft}
                         onChange={(e) => setIpDraft(e.target.value)}
                         onKeyDown={(e) => e.key === 'Enter' && commitEdit(node.id)}
-                        className="min-h-[34px] min-w-0 flex-1 rounded-xl border border-white/30 bg-black/30 px-2.5 font-mono-tabular text-xs text-[var(--relay-text)] focus:outline-none"
+                        className="min-h-[34px] min-w-0 flex-1 rounded-xl border border-black/15 bg-zinc-50 px-2.5 font-mono-tabular text-xs text-[var(--relay-text)] focus:border-blue-500/60 focus:outline-none dark:border-white/25 dark:bg-zinc-900"
                       />
                       <button
                         type="button"
                         onClick={() => commitEdit(node.id)}
                         aria-label="保存地址"
-                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-white text-[#0D1017]"
+                        className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-zinc-900 text-white dark:bg-white dark:text-zinc-950"
                       >
                         <Check className="h-3.5 w-3.5" />
                       </button>
@@ -311,15 +337,16 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                 disabled={isFetchingDigest}
                 className="mini-tile inline-flex min-h-[34px] items-center gap-1.5 rounded-xl px-3 text-xs font-medium text-[var(--relay-text)] disabled:opacity-60"
               >
-                <RefreshCw className={`h-3.5 w-3.5 ${isFetchingDigest ? 'animate-spin' : ''}`} />
-                <span>刷新简报</span>
+                <ArrowsClockwise
+                  weight="regular"
+                  className={`h-3.5 w-3.5 text-zinc-700 dark:text-zinc-200 ${isFetchingDigest ? 'animate-spin' : ''}`}
+                />
+                <span>刷新</span>
               </button>
             </div>
 
             {briefings.length === 0 ? (
-              <div className="py-10 text-center text-xs text-[var(--relay-text-faint)]">
-                暂无简报
-              </div>
+              <div className="py-10 text-center text-xs text-[var(--relay-text-faint)]">—</div>
             ) : (
               <div
                 className="grid grid-cols-1 sm:grid-cols-2"
@@ -328,12 +355,6 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                 {briefings.map((item) => (
                   <article
                     key={item.id}
-                    style={
-                      {
-                        '--tile-tint':
-                          item.kind === 'paper' ? 'var(--tint-blue)' : 'var(--tint-violet)',
-                      } as React.CSSProperties
-                    }
                     className="board-tile flex flex-col justify-between gap-2.5"
                   >
                     <div>
@@ -344,12 +365,9 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                         <button
                           type="button"
                           onClick={() => onToggleSaveBriefing(item)}
-                          aria-label="收藏简报"
-                          className={
-                            item.saved ? 'text-[var(--accent-amber)]' : 'text-[var(--relay-text-faint)]'
-                          }
+                          aria-label="收藏"
                         >
-                          <Bookmark className={`h-4 w-4 ${item.saved ? 'fill-current' : ''}`} />
+                          <FeedBookmarkIcon className="h-4 w-4" active={item.saved} />
                         </button>
                       </div>
                       <button
@@ -360,14 +378,14 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                         {item.title}
                       </button>
                     </div>
-                    <div className="flex items-center justify-end border-t border-white/10 pt-2">
+                    <div className="flex items-center justify-end border-t border-[var(--relay-tile-border)] pt-2">
                       <button
                         type="button"
                         onClick={() => onAskAboutBriefing(item)}
                         className="inline-flex items-center gap-1 text-xs font-medium text-[var(--accent-sky)]"
                       >
-                        <span>深读</span>
-                        <ArrowUpRight className="h-3.5 w-3.5" />
+                        <span>追问</span>
+                        <ArrowUpRight weight="bold" className="h-3.5 w-3.5" />
                       </button>
                     </div>
                   </article>
@@ -430,7 +448,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                     <button
                       type="button"
                       onClick={() => onAskAboutFile(file)}
-                      className="shrink-0 rounded-lg bg-white/12 px-2.5 py-1.5 text-[11px] font-medium text-[var(--relay-text)]"
+                      className="shrink-0 rounded-lg bg-zinc-100 px-2.5 py-1.5 text-[11px] font-medium text-[var(--relay-text)] hover:bg-zinc-200/80 dark:bg-white/12 dark:hover:bg-white/18"
                     >
                       助理
                     </button>
@@ -445,14 +463,14 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
       {/* Briefing Reader Modal */}
       {selectedBriefing && (
         <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm sm:items-center sm:p-4"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/35 backdrop-blur-xs sm:items-center sm:p-4 dark:bg-black/60"
           onClick={() => onSelectBriefing(null)}
         >
           <div
             className="mac-card flex max-h-[85vh] w-full max-w-xl flex-col overflow-hidden rounded-t-[26px] text-[var(--relay-text)] sm:rounded-[26px]"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-white/12 px-5 py-4">
+            <div className="flex items-center justify-between border-b border-[var(--relay-tile-border)] px-5 py-4">
               <span className="text-xs font-medium text-[var(--relay-text-muted)]">
                 {selectedBriefing.source} · {selectedBriefing.publishedAt}
               </span>
@@ -460,7 +478,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                 type="button"
                 onClick={() => onSelectBriefing(null)}
                 aria-label="关闭"
-                className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--relay-text-muted)] hover:bg-white/10"
+                className="flex h-9 w-9 items-center justify-center rounded-full text-[var(--relay-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/10"
               >
                 <X className="h-4 w-4" />
               </button>
@@ -498,14 +516,14 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
       {/* File Preview Modal */}
       {previewFile && (
         <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 backdrop-blur-sm sm:items-center sm:p-4"
+          className="fixed inset-0 z-50 flex items-end justify-center bg-black/35 backdrop-blur-xs sm:items-center sm:p-4 dark:bg-black/60"
           onClick={() => onSelectPreviewFile(null)}
         >
           <div
             className="mac-card flex max-h-[80vh] w-full max-w-xl flex-col overflow-hidden rounded-t-[26px] text-[var(--relay-text)] sm:rounded-[26px]"
             onClick={(e) => e.stopPropagation()}
           >
-            <div className="flex items-center justify-between border-b border-white/12 px-5 py-4">
+            <div className="flex items-center justify-between border-b border-[var(--relay-tile-border)] px-5 py-4">
               <span className="truncate text-sm font-semibold text-[var(--relay-text)]">
                 {previewFile.name}
               </span>
@@ -513,7 +531,7 @@ export const SpaceView: React.FC<SpaceViewProps> = ({
                 type="button"
                 onClick={() => onSelectPreviewFile(null)}
                 aria-label="关闭预览"
-                className="flex h-9 w-9 items-center justify-center rounded-xl text-[var(--relay-text-muted)] hover:bg-white/10"
+                className="flex h-9 w-9 items-center justify-center rounded-full text-[var(--relay-text-muted)] hover:bg-black/[0.05] dark:hover:bg-white/10"
               >
                 <X className="h-4 w-4" />
               </button>

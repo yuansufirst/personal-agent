@@ -352,42 +352,29 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
   const autoContextToggles: {
     key: keyof DeviceContextConfig;
     label: string;
-    hint: string;
   }[] = [
-    { key: 'autoAttachTime', label: '本地时间与电量', hint: '极轻负载，推荐常开' },
-    { key: 'autoAttachCalendar', label: '近 3 天系统日程', hint: '对话时自动感知会议安排' },
-    { key: 'autoAttachClipboard', label: '当前剪贴板', hint: '自动带上刚复制的文本' },
-    { key: 'autoAttachLocation', label: '当前位置', hint: '出行与本地场景感知' },
-    { key: 'autoAttachNotifications', label: '近期应用通知', hint: '借鉴 Today 主动情境感知' },
+    { key: 'autoSyncAppState', label: '任务与进度' },
+    { key: 'autoAttachTime', label: '时间与电量' },
+    { key: 'autoAttachCalendar', label: '系统日程' },
+    { key: 'autoAttachClipboard', label: '剪贴板' },
+    { key: 'autoAttachLocation', label: '位置' },
+    { key: 'autoAttachNotifications', label: '应用通知' },
   ];
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-4">
       {/* Live Device Telemetry & Environment Banner */}
-      <div className="mac-card rounded-3xl p-5">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="flex items-start gap-3">
-            <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-2xl bg-blue-50 text-[#1B6EF3] dark:bg-blue-950/50 dark:text-blue-400">
-              <Smartphone className="h-5 w-5" />
+      <div className="mac-card rounded-3xl p-4.5">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded-2xl bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-100">
+              <Smartphone className="h-4.5 w-4.5" />
             </div>
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <h2 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">
-                  Android 端侧感知与执行桥
-                </h2>
-                <span
-                  className={`rounded-lg px-2 py-0.5 text-[11px] font-medium ${
-                    isNative
-                      ? 'bg-emerald-50 text-emerald-700 dark:bg-emerald-950/50 dark:text-emerald-400'
-                      : 'bg-amber-50 text-amber-700 dark:bg-amber-950/40 dark:text-amber-400'
-                  }`}
-                >
-                  {isNative ? 'APK 原生桥已激活' : '网页预览模式（完整权限需装 APK）'}
-                </span>
-              </div>
-              <p className="mt-1 text-xs leading-relaxed text-zinc-500 dark:text-zinc-400">
-                借鉴 Today 的端云协同理念：由你按需授权手机系统能力，所有数据仅保存在本机或直连你的私人云端 DSH Agent。
-              </p>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">Android</h2>
+              <span className="text-[11px] font-medium text-zinc-500 dark:text-zinc-400">
+                {isNative ? 'APK' : 'Web'}
+              </span>
             </div>
           </div>
 
@@ -395,10 +382,10 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
             type="button"
             onClick={() => void refreshOverview()}
             disabled={loadingKey === 'overview'}
-            className="inline-flex min-h-[36px] items-center gap-1.5 rounded-xl border border-stone-200 bg-white px-3 text-xs font-medium text-zinc-700 hover:bg-stone-50 dark:border-zinc-700 dark:bg-[#181A20] dark:text-zinc-200"
+            aria-label="刷新"
+            className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-stone-200 bg-white text-zinc-700 hover:bg-stone-50 dark:border-zinc-700 dark:bg-[#181A20] dark:text-zinc-200"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${loadingKey === 'overview' ? 'animate-spin' : ''}`} />
-            <span>刷新状态</span>
           </button>
         </div>
 
@@ -435,17 +422,18 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
         )}
       </div>
 
-      {/* Today-Style Auto-Context Injection Toggles */}
-      <div className="mac-card rounded-3xl p-5 space-y-3.5">
+      {/* Auto-Context Injection Toggles */}
+      <div className="mac-card rounded-3xl p-4.5 space-y-3">
         <div className="flex items-center gap-2">
-          <Sparkles className="h-4 w-4 text-[#1B6EF3] dark:text-blue-400" />
-          <h3 className="text-xs font-semibold text-zinc-700 dark:text-zinc-200">
-            自动情境注入（发消息时无感携带给云端助理）
-          </h3>
+          <Sparkles className="h-4 w-4 text-zinc-800 dark:text-zinc-200" />
+          <h3 className="text-xs font-semibold text-zinc-700 dark:text-zinc-200">自动感知</h3>
         </div>
-        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
-          {autoContextToggles.map(({ key, label, hint }) => {
-            const active = contextConfig[key];
+        <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+          {autoContextToggles.map(({ key, label }) => {
+            const active =
+              key === 'autoSyncAppState'
+                ? contextConfig.autoSyncAppState !== false
+                : Boolean(contextConfig[key]);
             return (
               <button
                 key={key}
@@ -456,21 +444,18 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
                     [key]: !active,
                   })
                 }
-                className={`flex min-h-[50px] items-center justify-between gap-3 rounded-2xl border px-3.5 py-2.5 text-left transition-all ${
+                className={`flex min-h-[44px] items-center justify-between gap-2 rounded-2xl border px-3 py-2 text-left transition-all ${
                   active
-                    ? 'border-[#1B6EF3]/60 bg-blue-50/40 dark:border-blue-500/50 dark:bg-blue-950/20'
+                    ? 'border-zinc-900/35 bg-zinc-100/70 dark:border-zinc-100/30 dark:bg-zinc-800/70'
                     : 'border-stone-200/80 bg-[#F8F7F4]/70 dark:border-zinc-800 dark:bg-[#0E0F12]/60'
                 }`}
               >
-                <div className="min-w-0">
-                  <div className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                    {label}
-                  </div>
-                  <div className="mt-0.5 truncate text-[11px] text-zinc-400">{hint}</div>
-                </div>
+                <span className="truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                  {label}
+                </span>
                 <span
-                  className={`flex h-5 w-9 shrink-0 items-center rounded-full p-0.5 transition-colors ${
-                    active ? 'bg-[#1B6EF3] justify-end' : 'bg-stone-300 dark:bg-zinc-700 justify-start'
+                  className={`flex h-5 w-8 shrink-0 items-center rounded-full p-0.5 transition-colors ${
+                    active ? 'bg-zinc-950 dark:bg-zinc-100 justify-end' : 'bg-stone-300 dark:bg-zinc-700 justify-start'
                   }`}
                 >
                   <span className="h-4 w-4 rounded-full bg-white shadow-xs" />
@@ -488,15 +473,12 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
           <div>
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2.5">
-                <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-stone-100 text-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+                <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-blue-50 text-blue-600 dark:bg-blue-500/15 dark:text-blue-400">
                   <Clipboard className="h-4 w-4" />
                 </div>
-                <div>
-                  <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">剪贴板读写</h3>
-                  <p className="text-[11px] text-zinc-400">快速读取刚复制的链接、文字或摘要</p>
-                </div>
+                <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">剪贴板</h3>
               </div>
-              <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">可用</span>
+              <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">●</span>
             </div>
 
             {clipboardText && (
@@ -536,15 +518,12 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
           <div>
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2.5">
-                <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-stone-100 text-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+                <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-amber-50 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400">
                   <AlarmClock className="h-4 w-4" />
                 </div>
-                <div>
-                  <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">系统闹钟与倒计时</h3>
-                  <p className="text-[11px] text-zinc-400">直连 Android 系统时钟，准时响铃</p>
-                </div>
+                <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">闹钟</h3>
               </div>
-              <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">系统内置</span>
+              <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">●</span>
             </div>
 
             <form onSubmit={(e) => void handleSetQuickAlarm(e)} className="mt-3 flex items-center gap-2">
@@ -590,13 +569,10 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
         <div className="mac-card rounded-3xl p-5 space-y-3.5 md:col-span-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2.5">
-              <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-stone-100 text-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+              <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-emerald-50 text-emerald-600 dark:bg-emerald-500/15 dark:text-emerald-400">
                 <Calendar className="h-4 w-4" />
               </div>
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">系统日历与日程</h3>
-                <p className="text-[11px] text-zinc-400">读写手机本地日程，让助理直接安排和防冲突</p>
-              </div>
+              <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">日历</h3>
             </div>
             <div className="flex items-center gap-2">
               {!perms.calendar ? (
@@ -684,14 +660,7 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
               <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-blue-50 text-[#1B6EF3] dark:bg-blue-950/50 dark:text-blue-400">
                 <Bell className="h-4 w-4" />
               </div>
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">
-                  系统通知感知（借鉴 Today 核心能力）
-                </h3>
-                <p className="text-[11px] text-zinc-400">
-                  本地缓存微信、钉钉、快递、航班等第三方通知，一键汇总给云端助理
-                </p>
-              </div>
+              <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">通知</h3>
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <button
@@ -777,16 +746,13 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
           <div>
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2.5">
-                <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-stone-100 text-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+                <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-violet-50 text-violet-600 dark:bg-violet-500/15 dark:text-violet-400">
                   <MessageSquareText className="h-4 w-4" />
                 </div>
-                <div>
-                  <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">短信识别</h3>
-                  <p className="text-[11px] text-zinc-400">自动归类快递、航班、账单与验证码</p>
-                </div>
+                <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">短信</h3>
               </div>
               {perms.sms && (
-                <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">已授权</span>
+                <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">●</span>
               )}
             </div>
 
@@ -850,16 +816,13 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
           <div>
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-2.5">
-                <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-stone-100 text-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+                <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-rose-50 text-rose-600 dark:bg-rose-500/15 dark:text-rose-400">
                   <MapPin className="h-4 w-4" />
                 </div>
-                <div>
-                  <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">地理位置</h3>
-                  <p className="text-[11px] text-zinc-400">按需获取实时坐标与地址，辅助出行与周边规划</p>
-                </div>
+                <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">定位</h3>
               </div>
               {perms.location && (
-                <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">已授权</span>
+                <span className="text-[11px] font-medium text-emerald-600 dark:text-emerald-400">●</span>
               )}
             </div>
 
@@ -916,18 +879,12 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
         <div className="mac-card rounded-3xl p-5 space-y-3.5 md:col-span-2">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex items-center gap-2.5">
-              <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-stone-100 text-zinc-700 dark:bg-zinc-900 dark:text-zinc-200">
+              <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-amber-50 text-amber-600 dark:bg-amber-500/15 dark:text-amber-400">
                 <FolderOpen className="h-4 w-4" />
               </div>
               <div>
-                <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">
-                  安卓本地文件系统（SAF 安全授权目录）
-                </h3>
-                <p className="text-[11px] text-zinc-400">
-                  {folderLabel
-                    ? `当前已授权目录：${folderLabel}`
-                    : '授权手机中的下载/文档/笔记目录，支持直接读取发给助理或写入新文档'}
-                </p>
+                <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">文件目录</h3>
+                {folderLabel && <p className="text-[11px] text-zinc-400">{folderLabel}</p>}
               </div>
             </div>
             <div className="flex items-center gap-2">
@@ -990,13 +947,11 @@ export const DeviceHubView: React.FC<DeviceHubViewProps> = ({
       </div>
 
       {/* Cloud DSH Agent Bidirectional Protocol Card */}
-      <div className="mac-card rounded-3xl p-5 space-y-3">
+      <div className="mac-card rounded-3xl p-4.5 space-y-2.5">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2">
             <ShieldCheck className="h-4 w-4 text-emerald-600 dark:text-emerald-400" />
-            <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">
-              让云端 DSH Agent 学会直接调用手机（双向闭环）
-            </h3>
+            <h3 className="text-sm font-semibold text-zinc-950 dark:text-zinc-50">云端协议</h3>
           </div>
           <div className="flex items-center gap-2">
             <button

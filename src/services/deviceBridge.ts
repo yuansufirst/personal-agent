@@ -138,6 +138,11 @@ interface NativeDeviceBridgePlugin {
     content: string;
     mimeType?: string;
   }): Promise<{ ok: boolean; uri: string; filename: string }>;
+  saveBinaryFile(options: {
+    filename: string;
+    base64Data: string;
+    mimeType?: string;
+  }): Promise<{ ok: boolean; uri: string; filename: string; location: string }>;
 }
 
 const NativeDeviceBridge = registerPlugin<NativeDeviceBridgePlugin>('DeviceBridge');
@@ -395,6 +400,25 @@ export async function writeDeviceFileText(
     throw new Error('写入手机本地文件需要在 Android APK 中运行');
   }
   return NativeDeviceBridge.writeDocumentFile({ filename, content, mimeType });
+}
+
+export async function saveBinaryFileToDevice(options: {
+  filename: string;
+  base64Data: string;
+  mimeType?: string;
+}): Promise<{ ok: boolean; uri: string; filename: string; location: string } | null> {
+  if (!hasNativeDeviceBridge()) {
+    return null;
+  }
+  try {
+    return await NativeDeviceBridge.saveBinaryFile(options);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/not implemented|unimplemented/i.test(msg)) {
+      return null;
+    }
+    throw err;
+  }
 }
 
 /**

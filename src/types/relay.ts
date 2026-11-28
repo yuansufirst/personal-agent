@@ -55,6 +55,7 @@ export interface DeviceContextConfig {
   autoAttachClipboard: boolean;
   autoAttachLocation: boolean;
   autoAttachNotifications: boolean;
+  autoSyncAppState?: boolean;
 }
 
 export type DeviceActionKind =
@@ -107,6 +108,7 @@ export interface BriefingItem {
   relevanceNote: string;
   saved: boolean;
   url: string;
+  origin?: 'agent' | 'user';
 }
 
 export interface ReminderItem {
@@ -119,6 +121,7 @@ export interface ReminderItem {
   channel: 'app' | 'browser' | 'ntfy';
   completed: boolean;
   note?: string;
+  origin?: 'agent' | 'user';
 }
 
 export interface GoalMilestone {
@@ -134,6 +137,53 @@ export interface GoalItem {
   status: 'active' | 'paused' | 'completed';
   milestones: GoalMilestone[];
   updatedAt: string;
+  origin?: 'agent' | 'user';
+}
+
+export interface AgentAppSyncPayload {
+  addReminders?: Array<{
+    id?: string;
+    title: string;
+    dueLabel?: string;
+    dayGroup?: 'today' | 'tomorrow' | 'week';
+    priority?: 'normal' | 'high';
+    channel?: 'app' | 'browser' | 'ntfy';
+    note?: string;
+    repeat?: string;
+  }>;
+  completeReminderIds?: string[];
+  deleteReminderIds?: string[];
+  addGoals?: Array<{
+    id?: string;
+    title: string;
+    notes?: string;
+    milestones?: Array<string | { id?: string; text: string; done?: boolean }>;
+  }>;
+  completeMilestoneMatches?: Array<{
+    goalId?: string;
+    goalTitle?: string;
+    milestoneText: string;
+    done?: boolean;
+  }>;
+  addBriefings?: Array<{
+    id?: string;
+    kind?: 'paper' | 'news';
+    title: string;
+    source?: string;
+    identifier?: string;
+    publishedAt?: string;
+    readMinutes?: number;
+    summary: string;
+    takeaways?: string[];
+    relevanceNote?: string;
+    url?: string;
+  }>;
+  updateHealth?: {
+    sleepHours?: number;
+    steps?: number;
+    waterCups?: number;
+    exerciseMinutes?: number;
+  };
 }
 
 export interface ApprovalAction {
@@ -150,12 +200,17 @@ export interface MeshFileItem {
   id: string;
   name: string;
   size: string;
+  mimeType?: string;
   sourceNode: 'cloud' | 'pc' | 'android';
   targetNode?: 'cloud' | 'pc' | 'android';
   path: string;
   updatedAt: string;
   status: 'synced' | 'transferring' | 'ready';
   previewText?: string;
+  downloadUrl?: string;
+  receiptId?: string;
+  dataUrl?: string;
+  base64Data?: string;
 }
 
 export interface MeshNode {
@@ -213,6 +268,7 @@ export interface MapCardItem {
 export type InteractiveCard =
   | { type: 'briefing'; data: BriefingItem }
   | { type: 'reminder'; data: ReminderItem }
+  | { type: 'goal'; data: GoalItem }
   | { type: 'approval'; data: ApprovalAction }
   | { type: 'file'; data: MeshFileItem }
   | { type: 'map'; data: MapCardItem }
@@ -221,10 +277,17 @@ export type InteractiveCard =
 export interface ChatAttachment {
   name: string;
   size: string;
+  sizeBytes?: number;
   mimeType: string;
   dataUrl?: string;
   base64Data?: string;
+  rawFile?: File;
   textContent?: string;
+  url?: string;
+  receiptId?: string;
+  sessionId?: string;
+  filePath?: string;
+  direction?: 'upload' | 'download';
 }
 
 export interface AgentToolStep {

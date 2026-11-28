@@ -1,5 +1,6 @@
 import { BRIEFING_IMAGES } from '../data/initialData';
 import type {
+  AgentAppSyncPayload,
   AgentToolStep,
   ChatAttachment,
   ChatMessage,
@@ -22,6 +23,8 @@ export { extractRelayCards };
 export interface AgentReplyChunk {
   text: string;
   cards?: InteractiveCard[];
+  syncPayloads?: AgentAppSyncPayload[];
+  attachments?: ChatAttachment[];
   thinking?: string;
   toolSteps?: AgentToolStep[];
   elapsedMs?: number;
@@ -217,14 +220,40 @@ function buildSandboxResponse(prompt: string): {
     };
   }
 
-  if (lower.includes('提醒') || lower.includes('日程') || lower.includes('/remind') || lower.includes('明天') || lower.includes('点')) {
+  if (lower.includes('目标') || lower.includes('计划') || lower.includes('goal')) {
+    const cleanedTitle = prompt
+      .replace(/^(帮我)?(新建|创建|添加|设定)?(一个)?(目标|计划)[:：]?\s*/i, '')
+      .trim() || '本周推进核心研究与论文整理';
+    return {
+      text: `已自动为你将目标「${cleanedTitle}」同步写入 Goals，并拆好了初始里程碑。你在界面勾选完成后，我下次对话会自动读取进度。`,
+      cards: [
+        {
+          type: 'goal',
+          data: {
+            id: `goal-gen-${idSuffix}`,
+            title: cleanedTitle,
+            notes: 'Productivity',
+            status: 'active',
+            updatedAt: '刚刚',
+            origin: 'agent',
+            milestones: [
+              { id: `ms-${idSuffix}-1`, text: '明确核心交付与时间节点', done: false },
+              { id: `ms-${idSuffix}-2`, text: '完成初版输出并复盘', done: false },
+            ],
+          },
+        },
+      ],
+    };
+  }
+
+  if (lower.includes('提醒') || lower.includes('日程') || lower.includes('待办') || lower.includes('/remind') || lower.includes('明天') || lower.includes('点')) {
     const cleanedTitle = prompt
       .replace(/^\/remind\s*/i, '')
-      .replace(/^(帮我)?(设置|创建|添加)?(一个)?提醒(我)?[:：]?\s*/i, '')
+      .replace(/^(帮我)?(设置|创建|添加)?(一个)?(提醒|待办)(我)?[:：]?\s*/i, '')
       .trim() || '整理个人工作站待办清单';
 
     return {
-      text: '已解析你的时间与事项，生成一条可交互提醒卡片。你可以直接勾选完成、延后，或一键同步进提醒中心（支持 ntfy 推送）。',
+      text: `已自动将「${cleanedTitle}」写入 Feeds 与日程提醒列表，无需手动设置。完成后直接勾选，我会自动同步你的完成情况。`,
       cards: [
         {
           type: 'reminder',
@@ -236,7 +265,8 @@ function buildSandboxResponse(prompt: string): {
             priority: lower.includes('重要') || lower.includes('紧急') ? 'high' : 'normal',
             channel: 'ntfy',
             completed: false,
-            note: '由对话中枢自动创建，可点击卡片同步至目标提醒。',
+            origin: 'agent',
+            note: '由助理自动推送至应用提醒列表',
           },
         },
       ],
@@ -312,7 +342,7 @@ export async function streamAgentReply(
     const simulated = buildSandboxResponse(prompt);
     const attachmentNote =
       attachments && attachments.length > 0
-        ? `\n\n已收到附件：${attachments.map((a) => `${a.name} (${a.size})`).join('、')}。`
+        ? `\n\n已收到你传输的 ${attachments.length} 个附件：${attachments.map((a) => `${a.name} (${a.size})`).join('、')}。在接入真实云端域名后，支持双向收发图片、PDF、Office 文档、压缩包、音视频与代码文件。`
         : '';
     const finalText = `${simulated.text}${attachmentNote}`;
     let accumulated = '';
@@ -344,9 +374,31 @@ export async function streamAgentReply(
     if (attachments && attachments.length > 0) {
       for (const att of attachments) {
         if (att.textContent) {
-          textBlocks.push(`[附件文件: ${att.name}]\n\`\`\`\n${att.textContent.slice(0, 40000)}\n\`\`\``);
-        } else if (att.mimeType.startsWith('image/') && att.dataUrl) {
-          imageParts.push({ type: 'image_url', image_url: { url: att.dataUrl } });
+          textBlocks.push(`[附件文件: ${att.name} (${att.size})]\n\`\`\`\n${att.textContent.slice(0, 40000)}\n\`\`\``);
+        } else if (att.mimeType.startsWith('image/') && (att.dataUrl || att.rawFile)) {
+          let imageDataUrl = att.dataUrl && att.dataUrl.startsWith('data:') ? att.dataUrl : '';
+          if (!imageDataUrl && att.rawFile) {
+            imageDataUrl = await new Promise<string>((resolve) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve(String(reader.result || ''));
+              reader.onerror = () => resolve('');
+              reader.readAsDataURL(att.rawFile!);
+            });
+          }
+          if (imageDataUrl) {
+            imageParts.push({ type: 'image_url', image_url: { url: imageDataUrl } });
+          }
+        } else {
+          const b64 = att.base64Data || (att.dataUrl && att.dataUrl.startsWith('data:') ? att.dataUrl.split(',')[1] : '');
+          if (b64 && b64.length <= 160_000) {
+            textBlocks.push(
+              `[二进制附件: ${att.name} | ${att.mimeType} | ${att.size}]\n\`\`\`base64\n${b64}\n\`\`\``
+            );
+          } else {
+            textBlocks.push(
+              `[二进制附件: ${att.name} | ${att.mimeType} | ${att.size}（体积较大，OpenAI 兼容接口仅支持内联图片与文本；建议切换 DeepSeek Harness 模式直传大文件）]`
+            );
+          }
         }
       }
     }
@@ -410,8 +462,8 @@ export async function streamAgentReply(
             const delta = json.choices?.[0]?.delta?.content || '';
             if (delta) {
               rawFull += delta;
-              const { cleanText, cards } = extractRelayCards(rawFull);
-              onChunk({ text: cleanText, cards, done: false });
+              const { cleanText, cards, syncPayloads } = extractRelayCards(rawFull);
+              onChunk({ text: cleanText, cards, syncPayloads, done: false });
             }
           } catch {
             // Skip malformed SSE chunks
@@ -419,15 +471,15 @@ export async function streamAgentReply(
         }
       }
 
-      const { cleanText, cards } = extractRelayCards(rawFull);
-      onChunk({ text: cleanText || '（已完成执行）', cards, done: true });
+      const { cleanText, cards, syncPayloads } = extractRelayCards(rawFull);
+      onChunk({ text: cleanText || '（已完成执行）', cards, syncPayloads, done: true });
       return;
     }
 
     const data = await res.json();
     const rawContent = data.choices?.[0]?.message?.content || JSON.stringify(data);
-    const { cleanText, cards } = extractRelayCards(rawContent);
-    onChunk({ text: cleanText, cards, done: true });
+    const { cleanText, cards, syncPayloads } = extractRelayCards(rawContent);
+    onChunk({ text: cleanText, cards, syncPayloads, done: true });
     return;
   }
 

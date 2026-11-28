@@ -1,10 +1,31 @@
-import type { InteractiveCard, MapCardItem } from '../types/relay';
+import type { AgentAppSyncPayload, InteractiveCard, MapCardItem } from '../types/relay';
+import { extractAgentSyncPayloads } from './agentSyncProtocol';
 
 /**
- * Full 5-card protocol prompt for teaching a live cloud Agent (DeepSeek Harness / OpenAI-compatible)
- * to output structured ```relay-card blocks that Relay renders natively.
+ * Full protocol prompt for teaching a live cloud Agent (DeepSeek Harness / OpenAI-compatible)
+ * to output structured ```relay-card and ```relay-sync blocks that Relay renders & applies automatically.
  */
-export const RELAY_CARDS_PROTOCOL_PROMPT = `请将以下「Relay 移动端交互卡片协议」记住并写入长期偏好：当你的回复涉及以下 5 类场景时，请在正常文字回复末尾附加对应的 \`\`\`relay-card 代码块（合法 JSON，可输出单个对象或数组），前端会自动渲染为可交互卡片。
+export const RELAY_CARDS_PROTOCOL_PROMPT = `请将以下「Relay 移动端卡片与自动同步协议」记住并写入长期偏好：
+1) 每次我发消息时，系统都会自动附带 [Relay App 自动状态同步] 快照，你可以直接读取我最新的提醒、目标里程碑完成情况、简报和健康进度，不需要让我手动汇报。
+2) 当你要自动帮我写入新的提醒、待办、目标、论文汇报，或更新已有条目的完成状态时，请在回复末尾附带 \`\`\`relay-sync 代码块（合法 JSON），App 会自动写入 Feeds / Goals / 日程，无需我手动添加：
+\`\`\`relay-sync
+{
+  "addReminders": [
+    { "title": "提交实验周报", "dueLabel": "明天 09:30", "dayGroup": "tomorrow", "priority": "high" }
+  ],
+  "completeReminderIds": [],
+  "addGoals": [
+    { "title": "完成论文初稿", "notes": "Productivity", "milestones": ["整理消融实验表格", "撰写 Method 章节"] }
+  ],
+  "completeMilestoneMatches": [
+    { "goalTitle": "完成论文初稿", "milestoneText": "整理消融实验表格", "done": true }
+  ],
+  "addBriefings": [
+    { "kind": "paper", "title": "论文或简报标题", "source": "arXiv cs.AI", "summary": "核心结论摘要", "takeaways": ["要点 1", "要点 2"] }
+  ]
+}
+\`\`\`
+3) 当回复涉及交互卡片时，请在末尾附带 \`\`\`relay-card 代码块（合法 JSON，支持单个对象或数组）：
 
 1. 高德地图与出行路线卡片（用户问想去哪里、查地点、查路线、高德 POI 规划时优先输出，坐标请直接使用高德 GCJ-02 经纬度）：
 \`\`\`relay-card
@@ -83,29 +104,34 @@ export const RELAY_CARDS_PROTOCOL_PROMPT = `请将以下「Relay 移动端交互
 }
 \`\`\`
 
-5. 跨设备文件卡片（电脑/云端文件预览与传输，type: "file"）：
+5. 跨设备文件 / 图片回传卡片（云端或电脑发送任意文件或图片到手机预览与一键下载保存，type: "file"）：
 \`\`\`relay-card
 {
   "type": "file",
   "data": {
     "id": "file-001",
-    "name": "weekly_report.md",
-    "size": "32 KB",
-    "sourceNode": "pc",
+    "name": "weekly_report.pdf",
+    "size": "320 KB",
+    "mimeType": "application/pdf",
+    "sourceNode": "cloud",
     "targetNode": "android",
-    "path": "D:/Workspace/weekly_report.md",
+    "path": "/root/.dsh/im/weekly_report.pdf",
+    "downloadUrl": "/api/files/weekly_report.pdf",
+    "receiptId": "可选：dsh 文件凭证 ID",
     "updatedAt": "刚刚",
     "status": "ready",
-    "previewText": "文件前几行摘要..."
+    "previewText": "文件摘要或前几行内容（可选）"
   }
 }
 \`\`\`
+（说明：当你要把云端生成的图片或任意文件发给我时，可直接输出 Markdown 图片 \`![说明](https://域名/路径或data:image/png;base64,...)\`，或输出上面的 \`type: "file"\` 卡片并填入 \`downloadUrl\` / \`receiptId\` / \`dataUrl\`，手机端会自动渲染图片/音视频预览并支持一键保存到相册或下载目录。）
 
 规则：JSON 必须严格合法、不含注释；每次可按需输出 1 张或多张卡片。`;
 
 const VALID_CARD_TYPES = new Set([
   'briefing',
   'reminder',
+  'goal',
   'approval',
   'file',
   'map',
@@ -118,6 +144,45 @@ function normalizeCard(raw: unknown): InteractiveCard | null {
   const type = typeof obj.type === 'string' ? obj.type.trim() : '';
   if (!VALID_CARD_TYPES.has(type) || !obj.data || typeof obj.data !== 'object') {
     return null;
+  }
+
+  if (type === 'goal') {
+    const d = obj.data as Record<string, unknown>;
+    const title = String(d.title || '').trim();
+    if (!title) return null;
+    const rawMilestones = Array.isArray(d.milestones) ? d.milestones : [];
+    const milestones = rawMilestones
+      .map((m, idx) => {
+        if (typeof m === 'string' && m.trim()) {
+          return { id: `ms-${Date.now().toString(36)}-${idx}`, text: m.trim(), done: false };
+        }
+        if (m && typeof m === 'object') {
+          const mo = m as Record<string, unknown>;
+          const text = String(mo.text || mo.title || '').trim();
+          if (!text) return null;
+          return {
+            id: String(mo.id || `ms-${Date.now().toString(36)}-${idx}`),
+            text,
+            done: Boolean(mo.done || mo.completed),
+          };
+        }
+        return null;
+      })
+      .filter((x): x is { id: string; text: string; done: boolean } => Boolean(x));
+
+    return {
+      type: 'goal',
+      data: {
+        id: String(d.id || `goal-${Date.now().toString(36)}`),
+        title,
+        notes: typeof d.notes === 'string' ? d.notes : undefined,
+        status:
+          d.status === 'paused' || d.status === 'completed' ? d.status : 'active',
+        milestones,
+        updatedAt: String(d.updatedAt || '刚刚'),
+        origin: 'agent',
+      },
+    };
   }
 
   if (type === 'map') {
@@ -191,6 +256,45 @@ function normalizeCard(raw: unknown): InteractiveCard | null {
     return { type: 'map', data: normalized };
   }
 
+  if (type === 'file') {
+    const d = obj.data as Record<string, unknown>;
+    const rawSource = String(d.sourceNode || 'cloud');
+    const sourceNode: 'cloud' | 'pc' | 'android' =
+      rawSource === 'pc' || rawSource === 'android' ? rawSource : 'cloud';
+    const rawTarget = d.targetNode ? String(d.targetNode) : 'android';
+    const targetNode: 'cloud' | 'pc' | 'android' =
+      rawTarget === 'cloud' || rawTarget === 'pc' ? rawTarget : 'android';
+    return {
+      type: 'file',
+      data: {
+        id: String(d.id || `file-${Date.now().toString(36)}`),
+        name: String(d.name || d.filename || '未命名文件'),
+        size: String(d.size || '未知大小'),
+        mimeType: typeof d.mimeType === 'string' ? d.mimeType : typeof d.mediaType === 'string' ? d.mediaType : undefined,
+        sourceNode,
+        targetNode,
+        path: String(d.path || d.filePath || d.downloadUrl || d.url || ''),
+        updatedAt: String(d.updatedAt || '刚刚'),
+        status: d.status === 'synced' || d.status === 'transferring' ? d.status : 'ready',
+        previewText: typeof d.previewText === 'string' ? d.previewText : undefined,
+        downloadUrl:
+          typeof d.downloadUrl === 'string'
+            ? d.downloadUrl
+            : typeof d.url === 'string'
+              ? d.url
+              : undefined,
+        receiptId:
+          typeof d.receiptId === 'string'
+            ? d.receiptId
+            : typeof d.fileId === 'string'
+              ? d.fileId
+              : undefined,
+        dataUrl: typeof d.dataUrl === 'string' ? d.dataUrl : undefined,
+        base64Data: typeof d.base64Data === 'string' ? d.base64Data : undefined,
+      },
+    };
+  }
+
   return obj as unknown as InteractiveCard;
 }
 
@@ -201,14 +305,16 @@ function normalizeCard(raw: unknown): InteractiveCard | null {
 export function extractRelayCards(rawText: string): {
   cleanText: string;
   cards: InteractiveCard[];
+  syncPayloads: AgentAppSyncPayload[];
 } {
+  const { cleanText: afterSyncText, syncPayloads } = extractAgentSyncPayloads(rawText);
   const cards: InteractiveCard[] = [];
   const blocksToStrip: string[] = [];
 
   const cardRegex = /```(?:relay[-_]card|json)\s*([\s\S]*?)```/gi;
   let match: RegExpExecArray | null;
 
-  while ((match = cardRegex.exec(rawText)) !== null) {
+  while ((match = cardRegex.exec(afterSyncText)) !== null) {
     const fullMatch = match[0];
     const isExplicitRelayBlock = /^```relay[-_]card/i.test(fullMatch);
     const body = match[1].trim();
@@ -236,7 +342,7 @@ export function extractRelayCards(rawText: string): {
 
   const actionRegex = /```relay[-_]action\s*([\s\S]*?)```/gi;
   let actionIdx = 0;
-  while ((match = actionRegex.exec(rawText)) !== null) {
+  while ((match = actionRegex.exec(afterSyncText)) !== null) {
     blocksToStrip.push(match[0]);
     try {
       const parsed = JSON.parse(match[1].trim());
@@ -261,12 +367,12 @@ export function extractRelayCards(rawText: string): {
     }
   }
 
-  let cleanText = rawText;
+  let cleanText = afterSyncText;
   for (const block of blocksToStrip) {
     cleanText = cleanText.replace(block, '');
   }
   cleanText = cleanText.replace(/\n{3,}/g, '\n\n').trim();
-  return { cleanText, cards };
+  return { cleanText, cards, syncPayloads };
 }
 
 export interface CardQuickTrigger {

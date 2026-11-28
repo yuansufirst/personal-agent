@@ -17,7 +17,6 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
 import java.io.IOException;
-import java.net.URLEncoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -194,6 +193,8 @@ public class DshSocketPlugin extends Plugin {
         String sessionId = call.getString("sessionId", "");
         String mode = call.getString("mode", "raw"); // "raw" or "multipart"
         String origin = call.getString("origin");
+        Integer timeoutMsObj = call.getInt("timeoutMs", 180000);
+        int timeoutMs = timeoutMsObj != null ? Math.max(15000, Math.min(timeoutMsObj, 300000)) : 180000;
 
         if (url == null || url.isEmpty() || base64Data == null || base64Data.isEmpty()) {
             call.reject("Missing url or base64Data");
@@ -210,12 +211,6 @@ public class DshSocketPlugin extends Plugin {
 
         String safeFilename = (filename != null && !filename.isEmpty()) ? filename : "upload.bin";
         String asciiFilename = toAsciiHeaderFilename(safeFilename);
-        String encodedFilename;
-        try {
-            encodedFilename = URLEncoder.encode(safeFilename, StandardCharsets.UTF_8.name()).replace("+", "%20");
-        } catch (Exception e) {
-            encodedFilename = asciiFilename;
-        }
 
         MediaType mediaType = MediaType.parse(mimeType != null ? mimeType : "application/octet-stream");
         RequestBody body;
@@ -224,6 +219,7 @@ public class DshSocketPlugin extends Plugin {
             if (sessionId != null && !sessionId.isEmpty()) {
                 mb.addFormDataPart("sessionId", sessionId);
             }
+            mb.addFormDataPart("name", safeFilename);
             mb.addFormDataPart("filename", safeFilename);
             mb.addFormDataPart("mimeType", mimeType != null ? mimeType : "application/octet-stream");
             mb.addFormDataPart(
@@ -233,7 +229,8 @@ public class DshSocketPlugin extends Plugin {
             );
             body = mb.build();
         } else {
-            body = RequestBody.create(bytes, mediaType);
+            MediaType rawType = MediaType.parse("application/octet-stream");
+            body = RequestBody.create(bytes, rawType);
         }
 
         Request.Builder reqBuilder = new Request.Builder()
@@ -242,18 +239,14 @@ public class DshSocketPlugin extends Plugin {
         if (origin != null && !origin.isEmpty()) {
             reqBuilder.header("Origin", origin);
         }
-        if ("raw".equals(mode)) {
-            reqBuilder.header("X-File-Name", encodedFilename);
-            reqBuilder.header(
-                "Content-Disposition",
-                "attachment; filename=\"" + asciiFilename + "\"; filename*=UTF-8''" + encodedFilename
-            );
-            if (sessionId != null && !sessionId.isEmpty()) {
-                reqBuilder.header("X-Session-Id", sessionId);
-            }
-        }
 
-        httpClient.newCall(reqBuilder.build()).enqueue(new Callback() {
+        OkHttpClient uploadClient = httpClient.newBuilder()
+            .writeTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .callTimeout(timeoutMs + 15000L, TimeUnit.MILLISECONDS)
+            .build();
+
+        uploadClient.newCall(reqBuilder.build()).enqueue(new Callback() {
             @Override
             public void onFailure(@NonNull Call httpCall, @NonNull IOException e) {
                 call.reject(e.getMessage() != null ? e.getMessage() : "Upload network error");
@@ -267,6 +260,149 @@ public class DshSocketPlugin extends Plugin {
                     out.put("status", res.code());
                     out.put("ok", res.isSuccessful());
                     out.put("body", text);
+                    call.resolve(out);
+                }
+            }
+        });
+    }
+
+    /**
+     * Executes JSON/text HTTP requests via OkHttp with real timeouts and same-origin headers,
+     * bypassing Android WebView CORS/Sec-Fetch-Site and CapacitorHttp AbortSignal quirks.
+     */
+    @PluginMethod
+    public void httpRequest(PluginCall call) {
+        String url = call.getString("url");
+        String method = call.getString("method", "POST");
+        String bodyStr = call.getString("body", "");
+        String contentType = call.getString("contentType", "application/json; charset=utf-8");
+        String origin = call.getString("origin");
+        Integer timeoutMsObj = call.getInt("timeoutMs", 30000);
+        int timeoutMs = timeoutMsObj != null ? Math.max(5000, Math.min(timeoutMsObj, 180000)) : 30000;
+        JSObject headersObj = call.getObject("headers");
+
+        if (url == null || url.isEmpty()) {
+            call.reject("Missing url");
+            return;
+        }
+
+        Request.Builder reqBuilder = new Request.Builder().url(url);
+        if (origin != null && !origin.isEmpty()) {
+            reqBuilder.header("Origin", origin);
+        }
+        if (headersObj != null) {
+            java.util.Iterator<String> keys = headersObj.keys();
+            while (keys.hasNext()) {
+                String k = keys.next();
+                String v = headersObj.optString(k, null);
+                if (k != null && v != null && !k.isEmpty()) {
+                    reqBuilder.header(k, v);
+                }
+            }
+        }
+
+        String upperMethod = (method != null ? method : "POST").toUpperCase();
+        if ("GET".equals(upperMethod) || "HEAD".equals(upperMethod)) {
+            reqBuilder.method(upperMethod, null);
+        } else {
+            MediaType mt = MediaType.parse(contentType != null ? contentType : "application/json; charset=utf-8");
+            RequestBody reqBody = RequestBody.create(
+                (bodyStr != null ? bodyStr : "").getBytes(StandardCharsets.UTF_8),
+                mt
+            );
+            reqBuilder.method(upperMethod, reqBody);
+        }
+
+        OkHttpClient callClient = httpClient.newBuilder()
+            .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .writeTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .callTimeout(timeoutMs + 10000L, TimeUnit.MILLISECONDS)
+            .build();
+
+        callClient.newCall(reqBuilder.build()).enqueue(new Callback() {
+            @Override
+            public void onFailure(@NonNull Call httpCall, @NonNull IOException e) {
+                call.reject(e.getMessage() != null ? e.getMessage() : "HTTP network error");
+            }
+
+            @Override
+            public void onResponse(@NonNull Call httpCall, @NonNull Response response) throws IOException {
+                try (Response res = response) {
+                    String text = res.body() != null ? res.body().string() : "";
+                    JSObject out = new JSObject();
+                    out.put("status", res.code());
+                    out.put("ok", res.isSuccessful());
+                    out.put("body", text);
+                    out.put("contentType", res.header("Content-Type", ""));
+                    call.resolve(out);
+                }
+            }
+        });
+    }
+
+    /**
+     * Downloads any remote image or binary file natively via OkHttp (with same-origin header)
+     * so cloud-hosted files bypass Android WebView Sec-Fetch-Site / CORS blocks.
+     */
+    @PluginMethod
+    public void downloadBinary(PluginCall call) {
+        String url = call.getString("url");
+        String origin = call.getString("origin");
+        Integer timeoutMsObj = call.getInt("timeoutMs", 45000);
+        int timeoutMs = timeoutMsObj != null ? Math.max(5000, Math.min(timeoutMsObj, 180000)) : 45000;
+
+        if (url == null || url.isEmpty()) {
+            call.reject("Missing url");
+            return;
+        }
+
+        Request.Builder reqBuilder = new Request.Builder().url(url).get();
+        if (origin != null && !origin.isEmpty()) {
+            reqBuilder.header("Origin", origin);
+        }
+
+        OkHttpClient callClient = httpClient.newBuilder()
+            .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
+            .callTimeout(timeoutMs + 10000L, TimeUnit.MILLISECONDS)
+            .build();
+
+        callClient.newCall(reqBuilder.build()).enqueue(new Callback() {
+            @Override
+            public void onFailure(@NonNull Call httpCall, @NonNull IOException e) {
+                call.reject(e.getMessage() != null ? e.getMessage() : "Download network error");
+            }
+
+            @Override
+            public void onResponse(@NonNull Call httpCall, @NonNull Response response) throws IOException {
+                try (Response res = response) {
+                    byte[] rawBytes = res.body() != null ? res.body().bytes() : new byte[0];
+                    // Cap single in-memory bridge transfer to 24 MB to protect WebView IPC
+                    if (rawBytes.length > 24 * 1024 * 1024) {
+                        call.reject("文件超过 24 MB，请通过浏览器直接下载");
+                        return;
+                    }
+                    String mime = res.header("Content-Type", "application/octet-stream");
+                    if (mime != null && mime.contains(";")) {
+                        mime = mime.substring(0, mime.indexOf(';')).trim();
+                    }
+                    String disp = res.header("Content-Disposition", "");
+                    String parsedName = "";
+                    if (disp != null && !disp.isEmpty()) {
+                        int fnIdx = disp.indexOf("filename=");
+                        if (fnIdx >= 0) {
+                            parsedName = disp.substring(fnIdx + 9).replace("\"", "").trim();
+                            int semi = parsedName.indexOf(';');
+                            if (semi >= 0) parsedName = parsedName.substring(0, semi).trim();
+                        }
+                    }
+
+                    JSObject out = new JSObject();
+                    out.put("status", res.code());
+                    out.put("ok", res.isSuccessful());
+                    out.put("mimeType", mime != null ? mime : "application/octet-stream");
+                    out.put("filename", parsedName);
+                    out.put("size", rawBytes.length);
+                    out.put("base64Data", res.isSuccessful() ? Base64.encodeToString(rawBytes, Base64.NO_WRAP) : "");
                     call.resolve(out);
                 }
             }

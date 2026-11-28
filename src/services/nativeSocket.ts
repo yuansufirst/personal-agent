@@ -12,7 +12,29 @@ interface DshSocketPlugin {
     sessionId?: string;
     mode?: 'raw' | 'multipart';
     origin?: string;
+    timeoutMs?: number;
   }): Promise<{ status: number; ok: boolean; body: string }>;
+  httpRequest(options: {
+    url: string;
+    method?: string;
+    body?: string;
+    contentType?: string;
+    headers?: Record<string, string>;
+    origin?: string;
+    timeoutMs?: number;
+  }): Promise<{ status: number; ok: boolean; body: string; contentType?: string }>;
+  downloadBinary(options: {
+    url: string;
+    origin?: string;
+    timeoutMs?: number;
+  }): Promise<{
+    status: number;
+    ok: boolean;
+    mimeType: string;
+    filename: string;
+    size: number;
+    base64Data: string;
+  }>;
   addListener(
     eventName: 'wsOpen',
     listenerFunc: (event: { id: string }) => void
@@ -170,9 +192,13 @@ export function createDshWebSocket(wsUrl: string): DshWebSocketLike {
   return new WebSocket(wsUrl);
 }
 
+export function isNativeDshSocketAvailable(): boolean {
+  return Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('DshSocket');
+}
+
 /**
  * Uses OkHttp native upload in the Android APK (bypassing CapacitorHttp Blob quirks and CORS),
- * or returns null on web so caller uses standard fetch().
+ * or returns null on web so caller uses standard XHR/fetch.
  */
 export async function uploadBinaryNativeIfAvailable(options: {
   url: string;
@@ -181,12 +207,75 @@ export async function uploadBinaryNativeIfAvailable(options: {
   filename: string;
   sessionId?: string;
   mode: 'raw' | 'multipart';
+  timeoutMs?: number;
 }): Promise<{ status: number; ok: boolean; body: string } | null> {
-  if (!Capacitor.isNativePlatform() || !Capacitor.isPluginAvailable('DshSocket')) {
+  if (!isNativeDshSocketAvailable()) {
     return null;
   }
   return DshSocket.uploadBinary({
     ...options,
     origin: deriveSameOrigin(options.url),
   });
+}
+
+/**
+ * Uses OkHttp native JSON/text HTTP request in the Android APK so unary RPCs have
+ * real timeouts and same-origin headers without CapacitorHttp AbortSignal quirks.
+ */
+export async function httpRequestNativeIfAvailable(options: {
+  url: string;
+  method?: string;
+  body?: string;
+  contentType?: string;
+  headers?: Record<string, string>;
+  timeoutMs?: number;
+}): Promise<{ status: number; ok: boolean; body: string; contentType?: string } | null> {
+  if (!Capacitor.isNativePlatform() || !Capacitor.isPluginAvailable('DshSocket')) {
+    return null;
+  }
+  try {
+    return await DshSocket.httpRequest({
+      ...options,
+      origin: deriveSameOrigin(options.url),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Older APK installed on phone before rebuilding won't have `httpRequest` method yet
+    if (/not implemented|unimplemented/i.test(msg)) {
+      return null;
+    }
+    throw err;
+  }
+}
+
+/**
+ * Downloads any remote image or binary file via OkHttp in Android APK (bypassing WebView
+ * cross-site 403 / CORS restrictions), or returns null on Web/older APK so caller falls back to fetch().
+ */
+export async function downloadBinaryNativeIfAvailable(options: {
+  url: string;
+  timeoutMs?: number;
+}): Promise<{
+  status: number;
+  ok: boolean;
+  mimeType: string;
+  filename: string;
+  size: number;
+  base64Data: string;
+} | null> {
+  if (!Capacitor.isNativePlatform() || !Capacitor.isPluginAvailable('DshSocket')) {
+    return null;
+  }
+  try {
+    return await DshSocket.downloadBinary({
+      ...options,
+      origin: deriveSameOrigin(options.url),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/not implemented|unimplemented/i.test(msg)) {
+      return null;
+    }
+    throw err;
+  }
 }

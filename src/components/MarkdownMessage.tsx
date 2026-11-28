@@ -1,10 +1,19 @@
 import React, { useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
-import { Check, Copy } from 'lucide-react';
+import { Check, Copy, Download, Loader2 } from 'lucide-react';
+import { CloudImage } from './CloudMedia';
+import {
+  isLikelyDownloadableLink,
+  resolveCloudFileUrl,
+  saveAttachmentToLocalDevice,
+} from '../services/fileTransfer';
 
 interface MarkdownMessageProps {
   content: string;
+  serverUrl?: string;
+  onOpenLightbox?: (img: { src: string; name: string }) => void;
+  onShowToast?: (msg: string) => void;
 }
 
 const CodeBlock: React.FC<{ language?: string; code: string }> = ({ language, code }) => {
@@ -40,11 +49,113 @@ const CodeBlock: React.FC<{ language?: string; code: string }> = ({ language, co
   );
 };
 
-export const MarkdownMessage: React.FC<MarkdownMessageProps> = ({ content }) => {
+const MarkdownLink: React.FC<{
+  href?: string;
+  children: React.ReactNode;
+  serverUrl?: string;
+  onShowToast?: (msg: string) => void;
+}> = ({ href, children, serverUrl, onShowToast }) => {
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const resolvedHref = resolveCloudFileUrl(href, serverUrl);
+  const downloadable = isLikelyDownloadableLink(resolvedHref);
+
+  const guessFilename = (): string => {
+    const label = typeof children === 'string' ? children.trim() : '';
+    if (label && /\.[a-z0-9]{1,8}$/i.test(label) && !label.includes('/')) {
+      return label;
+    }
+    try {
+      const parsed = new URL(resolvedHref);
+      const seg = parsed.pathname.split('/').filter(Boolean).pop();
+      if (seg && seg.includes('.')) return decodeURIComponent(seg);
+    } catch {
+      // ignore
+    }
+    return label && label.length <= 64 ? label : `relay-file-${Date.now()}`;
+  };
+
+  const handleDownload = async (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (saving || !resolvedHref) return;
+    setSaving(true);
+    try {
+      const res = await saveAttachmentToLocalDevice(
+        {
+          name: guessFilename(),
+          dataUrl: resolvedHref.startsWith('data:') ? resolvedHref : undefined,
+          url: !resolvedHref.startsWith('data:') ? resolvedHref : undefined,
+        },
+        serverUrl
+      );
+      setSaved(true);
+      onShowToast?.(`已保存「${res.filename}」到 ${res.location}`);
+      window.setTimeout(() => setSaved(false), 2200);
+    } catch (err) {
+      onShowToast?.(err instanceof Error ? err.message : '下载文件失败');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const isDataUrl = resolvedHref.startsWith('data:');
+
+  return (
+    <span className="inline-flex flex-wrap items-center gap-1.5 align-baseline">
+      <a
+        href={isDataUrl ? undefined : resolvedHref || href}
+        target={isDataUrl ? undefined : '_blank'}
+        rel={isDataUrl ? undefined : 'noopener noreferrer'}
+        onClick={isDataUrl ? (e) => void handleDownload(e) : undefined}
+        className="cursor-pointer font-medium text-[#1B6EF3] underline decoration-[#1B6EF3]/30 underline-offset-4 transition-colors hover:decoration-[#1B6EF3] dark:text-blue-400"
+      >
+        {children}
+      </a>
+      {downloadable && (
+        <button
+          type="button"
+          onClick={(e) => void handleDownload(e)}
+          disabled={saving}
+          aria-label="下载保存文件"
+          className="inline-flex items-center gap-1 rounded-lg border border-black/[0.08] bg-zinc-50 px-1.5 py-0.5 text-[11px] font-medium text-[var(--relay-text)] transition-colors hover:bg-zinc-100 disabled:opacity-50 dark:border-white/15 dark:bg-white/10 dark:hover:bg-white/18"
+        >
+          {saving ? (
+            <Loader2 className="h-3 w-3 animate-spin" />
+          ) : saved ? (
+            <Check className="h-3 w-3 text-emerald-400" />
+          ) : (
+            <Download className="h-3 w-3" />
+          )}
+          <span>{saved ? '已保存' : '保存'}</span>
+        </button>
+      )}
+    </span>
+  );
+};
+
+function safeUrlTransform(url: string): string {
+  const trimmed = (url || '').trim();
+  if (!trimmed) return '';
+  if (/^(javascript|vbscript):/i.test(trimmed)) return '';
+  if (/^(https?:|mailto:|tel:|data:image\/|data:application\/|data:text\/|data:audio\/|data:video\/|blob:|\/|#|\.)/i.test(trimmed)) {
+    return trimmed;
+  }
+  return trimmed;
+}
+
+export const MarkdownMessage: React.FC<MarkdownMessageProps> = ({
+  content,
+  serverUrl,
+  onOpenLightbox,
+  onShowToast,
+}) => {
   return (
     <div className="text-[15px] leading-[1.75] text-zinc-800 dark:text-zinc-200 break-words">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
+        urlTransform={safeUrlTransform}
         components={{
           h1: ({ children }) => (
             <h1 className="mt-5 mb-2.5 text-xl font-semibold tracking-tight text-zinc-950 dark:text-zinc-50 first:mt-0">
@@ -75,15 +186,21 @@ export const MarkdownMessage: React.FC<MarkdownMessageProps> = ({ content }) => 
             </blockquote>
           ),
           hr: () => <hr className="my-5 border-stone-200 dark:border-zinc-800" />,
+          img: ({ src, alt }) => (
+            <span className="my-2.5 block">
+              <CloudImage
+                src={src}
+                alt={alt || '图片'}
+                serverUrl={serverUrl}
+                onOpenLightbox={onOpenLightbox}
+                onShowToast={onShowToast}
+              />
+            </span>
+          ),
           a: ({ href, children }) => (
-            <a
-              href={href}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="font-medium text-[#1B6EF3] underline decoration-[#1B6EF3]/30 underline-offset-4 transition-colors hover:decoration-[#1B6EF3] dark:text-blue-400"
-            >
+            <MarkdownLink href={href} serverUrl={serverUrl} onShowToast={onShowToast}>
               {children}
-            </a>
+            </MarkdownLink>
           ),
           strong: ({ children }) => (
             <strong className="font-semibold text-zinc-950 dark:text-zinc-50">{children}</strong>

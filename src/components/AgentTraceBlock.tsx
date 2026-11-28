@@ -66,10 +66,10 @@ export const AgentTraceBlock: React.FC<AgentTraceBlockProps> = ({
         type="button"
         disabled={!canExpand}
         onClick={() => canExpand && setExpanded((prev) => !prev)}
-        className={`inline-flex items-center gap-2 rounded-xl px-2.5 py-1.5 text-xs transition-colors ${
+        className={`inline-flex items-center gap-2 rounded-full border border-black/[0.07] px-3 py-1.5 text-xs transition-colors dark:border-white/10 ${
           canExpand
-            ? 'bg-stone-100/90 text-zinc-600 hover:bg-stone-200/70 hover:text-zinc-900 dark:bg-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200'
-            : 'bg-stone-100/70 text-zinc-500 dark:bg-zinc-900/70 dark:text-zinc-400 cursor-default'
+            ? 'bg-white text-zinc-600 shadow-xs hover:bg-zinc-50 hover:text-zinc-950 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-100'
+            : 'bg-white/90 text-zinc-500 dark:bg-zinc-900/70 dark:text-zinc-400 cursor-default'
         }`}
       >
         {streaming ? (
@@ -88,7 +88,7 @@ export const AgentTraceBlock: React.FC<AgentTraceBlockProps> = ({
 
       {/* Layer 2: Structured Process Steps */}
       {expanded && canExpand && (
-        <div className="mt-2 rounded-2xl border border-stone-200/80 bg-white/80 p-3.5 text-xs dark:border-zinc-800 dark:bg-[#15171C] space-y-3">
+        <div className="mt-2 rounded-2xl border border-black/[0.07] bg-white p-3.5 text-xs shadow-sm dark:border-zinc-800 dark:bg-[#15171C] space-y-3">
           {hasTools && (
             <div className="space-y-2">
               {toolSteps!.map((step) => (
@@ -112,7 +112,7 @@ export const AgentTraceBlock: React.FC<AgentTraceBlockProps> = ({
                         {step.detail}
                       </p>
                     )}
-                    {showUnderHood && step.output && (
+                    {step.output && (
                       <pre className="mt-1.5 max-h-28 overflow-auto rounded-lg bg-stone-100 p-2 font-mono-tabular text-[11px] text-zinc-700 whitespace-pre-wrap break-all dark:bg-zinc-900 dark:text-zinc-300">
                         {step.output}
                       </pre>

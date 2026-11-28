@@ -7,19 +7,9 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Check,
-  Compass,
-  FlaskConical,
   Hash,
-  HeartPulse,
-  Menu,
-  MessageSquare,
   Pencil,
-  Plus,
-  RefreshCw,
   Search,
-  Settings,
-  Target,
-  Trash2,
   X,
 } from 'lucide-react';
 import {
@@ -44,7 +34,6 @@ import type {
   MeshNode,
   QuickMacro,
   ReminderItem,
-  ResearchItem,
   SessionRecord,
   TabKey,
 } from './types/relay';
@@ -60,18 +49,39 @@ import { GoalsView } from './components/GoalsView';
 import { SpaceView } from './components/SpaceView';
 import { ResearchView } from './components/ResearchView';
 import { HealthView } from './components/HealthView';
-import { GranularDotMatrix } from './components/GranularDotMatrix';
+import { InPlaceVoiceDock } from './components/InPlaceVoiceDock';
+import {
+  LibraryFloatingPopover,
+  type LibraryPopoverDestination,
+} from './components/LibraryFloatingPopover';
 import { ConnectionSheet } from './components/ConnectionSheet';
 import { SettingsModal } from './components/SettingsModal';
 import { OfflineIndicator, PWAInstallButton } from './components/PWAComponents';
+import {
+  ArrowsClockwise,
+  NavChatIcon,
+  NavFeedsIcon,
+  NavGoalsIcon,
+  NavHealthIcon,
+  NavLibraryIcon,
+  NavSettingsIcon,
+  Plus,
+  Trash,
+} from './components/AppIcons';
 import { registerAndroidBackHandler, syncNativeStatusBar } from './services/nativeApp';
-import { applyThemeTunerToDocument, loadThemeTunerSettings } from './services/themeTuner';
 import { DEFAULT_AGENT_PROFILE, resolveAvatarSrc } from './services/avatarPresets';
+import { startVoiceRecognition, type SpeechSessionHandle } from './services/nativeSpeech';
 import {
   buildAutoContextHeader,
   DEFAULT_DEVICE_CONTEXT_CONFIG,
   executeDeviceAction,
 } from './services/deviceBridge';
+import {
+  applyAgentUpdatesToAppState,
+  buildAppStateContextHeader,
+  buildManualAppStateSyncPrompt,
+  formatSyncToast,
+} from './services/agentSyncProtocol';
 
 const STORAGE_KEYS = {
   config: 'relay_connection_config_v2',
@@ -86,7 +96,7 @@ const STORAGE_KEYS = {
   healthLog: 'relay_health_log_v1',
   deviceContext: 'relay_device_context_v1',
   nodes: 'relay_mesh_nodes_v2',
-  theme: 'relay_theme_v1',
+  theme: 'relay_theme_v2',
 };
 
 const DEBUG_CLEANUP_FLAG = 'relay_debug_cleared_v1';
@@ -172,8 +182,17 @@ function sanitizeSessionsForStorage(sessions: SessionRecord[]): SessionRecord[] 
       attachments: m.attachments?.map((att) => ({
         name: att.name,
         size: att.size,
+        sizeBytes: att.sizeBytes,
         mimeType: att.mimeType,
-        dataUrl: att.dataUrl && att.dataUrl.length < 180_000 ? att.dataUrl : undefined,
+        dataUrl:
+          att.dataUrl && !att.dataUrl.startsWith('blob:') && att.dataUrl.length < 180_000
+            ? att.dataUrl
+            : undefined,
+        url: att.url,
+        receiptId: att.receiptId,
+        sessionId: att.sessionId,
+        filePath: att.filePath,
+        direction: att.direction,
       })),
     })),
   }));
@@ -185,7 +204,7 @@ export default function App() {
     const saved = loadFromStorage<string | null>(STORAGE_KEYS.theme, null);
     if (saved === 'dark') return true;
     if (saved === 'light') return false;
-    return true;
+    return false;
   });
 
   const [agentProfile, setAgentProfile] = useState<AgentProfile>(() =>
@@ -217,10 +236,6 @@ export default function App() {
 
   const [goals, setGoals] = useState<GoalItem[]>(() =>
     loadFromStorage(STORAGE_KEYS.goals, [])
-  );
-
-  const [researchItems, setResearchItems] = useState<ResearchItem[]>(() =>
-    loadFromStorage(STORAGE_KEYS.research, [])
   );
 
   const [healthConfig, setHealthConfig] = useState<HealthConfig>(() =>
@@ -268,6 +283,7 @@ export default function App() {
   const [spaceSubTab, setSpaceSubTab] = useState<'device' | 'environment' | 'library'>('device');
 
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [libraryPopoverOpen, setLibraryPopoverOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [connectionOpen, setConnectionOpen] = useState(false);
   const [selectedBriefing, setSelectedBriefing] = useState<BriefingItem | null>(null);
@@ -285,8 +301,46 @@ export default function App() {
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
 
+  // In-place voice input state for non-chat screens (Feeds / Goals / Health / Library)
+  const [inPlaceListening, setInPlaceListening] = useState(false);
+  const [inPlaceTranscribing, setInPlaceTranscribing] = useState(false);
+  const [inPlaceTranscript, setInPlaceTranscript] = useState('');
+  const [inPlaceSeconds, setInPlaceSeconds] = useState(0);
+  const [inPlaceMiniReplyPrompt, setInPlaceMiniReplyPrompt] = useState<string | null>(null);
+  const [inPlaceBaselineMsgCount, setInPlaceBaselineMsgCount] = useState<number>(0);
+
   const abortRef = useRef<AbortController | null>(null);
   const toastTimerRef = useRef<number | null>(null);
+  const inPlaceSpeechRef = useRef<SpeechSessionHandle | null>(null);
+  const inPlaceDiscardRef = useRef<boolean>(false);
+  const inPlaceAutoSendRef = useRef<boolean>(false);
+  const inPlaceTranscriptRef = useRef<string>('');
+
+  // Live refs for autonomous Agent <-> App sync without stale closures
+  const briefingsRef = useRef<BriefingItem[]>(briefings);
+  const remindersRef = useRef<ReminderItem[]>(reminders);
+  const goalsRef = useRef<GoalItem[]>(goals);
+  const healthLogRef = useRef<HealthDailyLog>(healthLog);
+  const healthConfigRef = useRef<HealthConfig>(healthConfig);
+  const ingestedCardIdsRef = useRef<Set<string>>(
+    new Set(loadFromStorage<string[]>('relay_ingested_card_ids_v1', []))
+  );
+
+  useEffect(() => {
+    briefingsRef.current = briefings;
+  }, [briefings]);
+  useEffect(() => {
+    remindersRef.current = reminders;
+  }, [reminders]);
+  useEffect(() => {
+    goalsRef.current = goals;
+  }, [goals]);
+  useEffect(() => {
+    healthLogRef.current = healthLog;
+  }, [healthLog]);
+  useEffect(() => {
+    healthConfigRef.current = healthConfig;
+  }, [healthConfig]);
 
   const avatarSrc = resolveAvatarSrc(agentProfile);
 
@@ -313,10 +367,6 @@ export default function App() {
   }, [activeSession.id, activeSessionId]);
 
   useEffect(() => {
-    applyThemeTunerToDocument(loadThemeTunerSettings());
-  }, []);
-
-  useEffect(() => {
     document.documentElement.classList.toggle('dark', darkMode);
     localStorage.setItem(STORAGE_KEYS.theme, JSON.stringify(darkMode ? 'dark' : 'light'));
     void syncNativeStatusBar(darkMode);
@@ -324,6 +374,10 @@ export default function App() {
 
   useEffect(() => {
     return registerAndroidBackHandler(() => {
+      if (libraryPopoverOpen) {
+        setLibraryPopoverOpen(false);
+        return true;
+      }
       if (drawerOpen) {
         setDrawerOpen(false);
         return true;
@@ -377,8 +431,21 @@ export default function App() {
   }, [goals]);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.research, JSON.stringify(researchItems));
-  }, [researchItems]);
+    inPlaceTranscriptRef.current = inPlaceTranscript;
+  }, [inPlaceTranscript]);
+
+  useEffect(() => {
+    if (!inPlaceListening) return;
+    setInPlaceSeconds(0);
+    const id = window.setInterval(() => setInPlaceSeconds((s) => s + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [inPlaceListening]);
+
+  useEffect(() => {
+    return () => {
+      inPlaceSpeechRef.current?.stop();
+    };
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.healthConfig, JSON.stringify(healthConfig));
@@ -476,7 +543,7 @@ export default function App() {
         }
       } catch {
         if (!silent) {
-          showToast('同步云端会话列表失败，请确认 Tailscale 连接正常');
+          showToast('同步云端会话列表失败，请确认 Cloudflare Tunnel 连接正常');
         }
       } finally {
         setIsLoadingSessions(false);
@@ -492,6 +559,52 @@ export default function App() {
       void handleRefreshSessions(true);
     }
   }, [config.mode, handleRefreshSessions]);
+
+  const ingestCardsFromRemoteHistory = (hist: ChatMessage[]) => {
+    const unseenCards: InteractiveCard[] = [];
+    for (const msg of hist) {
+      if (msg.role !== 'assistant' || !msg.cards?.length) continue;
+      for (const card of msg.cards) {
+        if (card.type === 'briefing' || card.type === 'reminder' || card.type === 'goal') {
+          if (!ingestedCardIdsRef.current.has(card.data.id)) {
+            unseenCards.push(card);
+            ingestedCardIdsRef.current.add(card.data.id);
+          }
+        }
+      }
+    }
+    if (unseenCards.length === 0) return;
+    const applied = applyAgentUpdatesToAppState(
+      {
+        briefings: briefingsRef.current,
+        reminders: remindersRef.current,
+        goals: goalsRef.current,
+        healthLog: healthLogRef.current,
+      },
+      unseenCards,
+      []
+    );
+    if (applied.changed) {
+      briefingsRef.current = applied.nextBriefings;
+      remindersRef.current = applied.nextReminders;
+      goalsRef.current = applied.nextGoals;
+      healthLogRef.current = applied.nextHealthLog;
+      setBriefings(applied.nextBriefings);
+      setReminders(applied.nextReminders);
+      setGoals(applied.nextGoals);
+      setHealthLog(applied.nextHealthLog);
+      try {
+        localStorage.setItem(
+          'relay_ingested_card_ids_v1',
+          JSON.stringify(Array.from(ingestedCardIdsRef.current).slice(-300))
+        );
+      } catch {
+        // ignore
+      }
+      const msg = formatSyncToast(applied.summary);
+      if (msg) showToast(msg);
+    }
+  };
 
   const handleSelectSession = async (targetId: string) => {
     if (abortRef.current) {
@@ -515,6 +628,7 @@ export default function App() {
       setIsLoadingHistory(true);
       try {
         const hist = await loadDshSessionHistory(config, target.remoteSessionId);
+        ingestCardsFromRemoteHistory(hist);
         setSessions((prev) =>
           prev.map((s) =>
             s.id === target.id
@@ -554,6 +668,7 @@ export default function App() {
       setIsLoadingHistory(true);
       try {
         const hist = await loadDshSessionHistory(config, clean);
+        ingestCardsFromRemoteHistory(hist);
         setSessions((prev) =>
           prev.map((s) =>
             s.id === created.id
@@ -660,11 +775,23 @@ export default function App() {
     try {
       let promptToSend = text;
       if (config.mode !== 'sandbox') {
-        const autoHeader = await buildAutoContextHeader(deviceContextConfig);
-        if (autoHeader) {
-          promptToSend = `${autoHeader}${text}`;
+        const autoDeviceHeader = await buildAutoContextHeader(deviceContextConfig);
+        const autoAppStateHeader =
+          deviceContextConfig.autoSyncAppState !== false
+            ? buildAppStateContextHeader({
+                goals: goalsRef.current,
+                reminders: remindersRef.current,
+                briefings: briefingsRef.current,
+                healthLog: healthLogRef.current,
+                healthConfig: healthConfigRef.current,
+              })
+            : '';
+        if (autoAppStateHeader || autoDeviceHeader) {
+          promptToSend = `${autoAppStateHeader}${autoDeviceHeader}${text}`;
         }
       }
+
+      let appliedTurnSync = false;
 
       await streamAgentReply(
         promptToSend,
@@ -681,11 +808,58 @@ export default function App() {
                     toolSteps: chunk.toolSteps ?? m.toolSteps,
                     elapsedMs: chunk.elapsedMs ?? m.elapsedMs,
                     cards: chunk.cards ?? m.cards,
+                    attachments: chunk.attachments ?? m.attachments,
                     streaming: !chunk.done,
                   }
                 : m
             )
           );
+
+          // Automatically push Agent-emitted briefings, reminders, goals, and relay-sync updates into the App
+          if (
+            chunk.done &&
+            !appliedTurnSync &&
+            ((chunk.cards && chunk.cards.length > 0) ||
+              (chunk.syncPayloads && chunk.syncPayloads.length > 0))
+          ) {
+            appliedTurnSync = true;
+            const applied = applyAgentUpdatesToAppState(
+              {
+                briefings: briefingsRef.current,
+                reminders: remindersRef.current,
+                goals: goalsRef.current,
+                healthLog: healthLogRef.current,
+              },
+              chunk.cards ?? [],
+              chunk.syncPayloads ?? []
+            );
+            if (applied.changed) {
+              briefingsRef.current = applied.nextBriefings;
+              remindersRef.current = applied.nextReminders;
+              goalsRef.current = applied.nextGoals;
+              healthLogRef.current = applied.nextHealthLog;
+              setBriefings(applied.nextBriefings);
+              setReminders(applied.nextReminders);
+              setGoals(applied.nextGoals);
+              setHealthLog(applied.nextHealthLog);
+              // Record ingested card IDs so remote history reloads won't resurrect deleted items
+              (chunk.cards ?? []).forEach((c) => {
+                if (c.type === 'briefing' || c.type === 'reminder' || c.type === 'goal') {
+                  ingestedCardIdsRef.current.add(c.data.id);
+                }
+              });
+              try {
+                localStorage.setItem(
+                  'relay_ingested_card_ids_v1',
+                  JSON.stringify(Array.from(ingestedCardIdsRef.current).slice(-300))
+                );
+              } catch {
+                // ignore
+              }
+              const msg = formatSyncToast(applied.summary);
+              if (msg) showToast(msg);
+            }
+          }
         },
         controller.signal,
         {
@@ -727,6 +901,52 @@ export default function App() {
     }
   };
 
+  // Optional manual sync trigger (automatic reading already happens on every message)
+  const handleManualSyncStateWithAgent = () => {
+    const prompt = buildManualAppStateSyncPrompt({
+      goals: goalsRef.current,
+      reminders: remindersRef.current,
+      briefings: briefingsRef.current,
+      healthLog: healthLogRef.current,
+      healthConfig: healthConfigRef.current,
+    });
+    if (activeTab !== 'chat') {
+      setInPlaceMiniReplyPrompt('同步任务与进度');
+      setInPlaceBaselineMsgCount(messages.length);
+    }
+    void handleSendMessage(prompt);
+  };
+
+  const handleSelectLibraryPopover = (dest: LibraryPopoverDestination) => {
+    if (dest === 'health') {
+      setActiveTab('health');
+      return;
+    }
+    if (dest === 'devices') {
+      setSpaceSubTab('environment');
+      setActiveTab('space');
+      return;
+    }
+    if (dest === 'files') {
+      setSpaceSubTab('library');
+      setActiveTab('space');
+      return;
+    }
+    setSpaceSubTab('device');
+    setActiveTab('space');
+  };
+
+  const activeLibraryPopoverDest: LibraryPopoverDestination | null =
+    activeTab === 'health'
+      ? 'health'
+      : activeTab === 'space'
+        ? spaceSubTab === 'environment'
+          ? 'devices'
+          : spaceSubTab === 'library'
+            ? 'files'
+            : 'phone'
+        : null;
+
   const handleStopStreaming = () => {
     if (abortRef.current) {
       abortRef.current.abort();
@@ -737,54 +957,124 @@ export default function App() {
     }
   };
 
-  // Research handlers
-  const handleAddResearch = (item: Omit<ResearchItem, 'id' | 'updatedAt'>) => {
-    setResearchItems((prev) => [
-      { ...item, id: `res-${Date.now()}`, updatedAt: todayDateKey() },
-      ...prev,
-    ]);
+  // Global in-place voice controller (keeps user on Feeds / Goals / Health / Library)
+  const dispatchInPlaceVoiceText = (rawText: string) => {
+    const clean = rawText.trim();
+    if (!clean) return;
+    setInPlaceTranscript('');
+    setInPlaceMiniReplyPrompt(clean);
+    setInPlaceBaselineMsgCount(messages.length);
+    void handleSendMessage(clean);
   };
 
-  const handleUpdateResearchProgress = (id: string, progress: number) => {
-    setResearchItems((prev) =>
-      prev.map((i) => (i.id === id ? { ...i, progress, updatedAt: todayDateKey() } : i))
+  const handleCancelInPlaceVoice = () => {
+    inPlaceDiscardRef.current = true;
+    inPlaceAutoSendRef.current = false;
+    inPlaceSpeechRef.current?.stop();
+    inPlaceSpeechRef.current = null;
+    setInPlaceListening(false);
+    setInPlaceTranscribing(false);
+    setInPlaceSeconds(0);
+    setInPlaceTranscript('');
+  };
+
+  const handleStartInPlaceVoice = async () => {
+    if (inPlaceListening || inPlaceTranscribing) return;
+    inPlaceDiscardRef.current = false;
+    inPlaceAutoSendRef.current = false;
+    setInPlaceTranscript('');
+    setInPlaceMiniReplyPrompt(null);
+
+    const session = await startVoiceRecognition(
+      {
+        onTranscript: (transcript, isFinal) => {
+          if (inPlaceDiscardRef.current) return;
+          setInPlaceTranscript(transcript);
+          if (isFinal) {
+            inPlaceSpeechRef.current = null;
+            if (inPlaceAutoSendRef.current && transcript.trim()) {
+              inPlaceAutoSendRef.current = false;
+              dispatchInPlaceVoiceText(transcript);
+            }
+          }
+        },
+        onStateChange: (active) => {
+          setInPlaceListening(active);
+        },
+        onError: (msg) => {
+          inPlaceSpeechRef.current = null;
+          inPlaceAutoSendRef.current = false;
+          setInPlaceListening(false);
+          if (!inPlaceDiscardRef.current) {
+            showToast(msg);
+          }
+        },
+      },
+      {
+        serverUrl: config.serverUrl,
+        onBusyChange: (busy) => {
+          if (inPlaceDiscardRef.current) {
+            setInPlaceTranscribing(false);
+            return;
+          }
+          setInPlaceTranscribing(busy);
+        },
+      }
     );
+
+    if (session) {
+      inPlaceSpeechRef.current = session;
+    }
   };
 
-  const handleUpdateResearchStatus = (id: string, status: ResearchItem['status']) => {
-    setResearchItems((prev) =>
-      prev.map((i) => (i.id === id ? { ...i, status, updatedAt: todayDateKey() } : i))
-    );
+  const handleConfirmSendInPlaceVoice = () => {
+    inPlaceDiscardRef.current = false;
+    inPlaceAutoSendRef.current = true;
+    if (inPlaceListening) {
+      inPlaceSpeechRef.current?.stop();
+      inPlaceSpeechRef.current = null;
+      setInPlaceListening(false);
+      window.setTimeout(() => {
+        if (inPlaceAutoSendRef.current && !inPlaceTranscribing && inPlaceTranscriptRef.current.trim()) {
+          inPlaceAutoSendRef.current = false;
+          dispatchInPlaceVoiceText(inPlaceTranscriptRef.current);
+        }
+      }, 260);
+    } else if (!inPlaceTranscribing && inPlaceTranscriptRef.current.trim()) {
+      inPlaceAutoSendRef.current = false;
+      dispatchInPlaceVoiceText(inPlaceTranscriptRef.current);
+    }
   };
 
-  const handleUpdateResearchItem = (
-    id: string,
-    patch: Partial<Pick<ResearchItem, 'title' | 'venueOrSource' | 'url' | 'notes' | 'category'>>
-  ) => {
-    setResearchItems((prev) =>
-      prev.map((i) => (i.id === id ? { ...i, ...patch, updatedAt: todayDateKey() } : i))
-    );
+  const handleTapAvatarInPlace = () => {
+    if (inPlaceListening || inPlaceTranscribing) {
+      handleCancelInPlaceVoice();
+    } else {
+      void handleStartInPlaceVoice();
+    }
   };
 
-  const handleDeleteResearch = (id: string) => {
-    setResearchItems((prev) => prev.filter((i) => i.id !== id));
-    showToast('已删除该科研记录');
-  };
-
-  const handleAskAboutResearch = (item: ResearchItem) => {
-    const prompt = [
-      `请帮我推进这条科研记录：「${item.title}」`,
-      item.venueOrSource ? `来源/出处：${item.venueOrSource}` : '',
-      `当前进度：${item.progress}%`,
-      item.url ? `参考链接：${item.url}` : '',
-      item.notes ? `已有笔记：\n${item.notes}` : '',
-      '请帮我提炼关键要点，并给出下一步最值得验证的实验或阅读建议。',
-    ]
-      .filter(Boolean)
-      .join('\n');
+  const handleAskAboutReminder = (item: ReminderItem) => {
     setActiveTab('chat');
-    void handleSendMessage(prompt);
+    void handleSendMessage(`关于提醒「${item.title}」（${item.dueLabel}），请帮我安排推进建议或准备相关事项。`);
   };
+
+  const formattedInPlaceTime = useMemo(() => {
+    const mins = Math.floor(inPlaceSeconds / 60);
+    const secs = inPlaceSeconds % 60;
+    return `${mins}:${secs.toString().padStart(2, '0')}`;
+  }, [inPlaceSeconds]);
+
+  const inPlaceMiniReply = useMemo(() => {
+    if (!inPlaceMiniReplyPrompt || activeTab === 'chat') return null;
+    const recent = messages.slice(inPlaceBaselineMsgCount);
+    const assistantMsg = [...recent].reverse().find((m) => m.role === 'assistant');
+    return {
+      prompt: inPlaceMiniReplyPrompt,
+      reply: assistantMsg?.content || '',
+      streaming: Boolean(assistantMsg?.streaming || isStreaming),
+    };
+  }, [inPlaceMiniReplyPrompt, activeTab, messages, inPlaceBaselineMsgCount, isStreaming]);
 
   // Health handlers
   const handleScheduleBedtimeReminder = () => {
@@ -893,8 +1183,11 @@ export default function App() {
 
   const handleFetchFreshDigest = () => {
     if (config.mode !== 'sandbox') {
-      setActiveTab('chat');
-      void handleSendMessage('请帮我抓取并整理今天的 AI 论文与科技简报。');
+      setInPlaceMiniReplyPrompt('获取今日汇报与提醒');
+      setInPlaceBaselineMsgCount(messages.length);
+      void handleSendMessage(
+        '请帮我汇总今天的重点汇报、待办提醒与科技简报，并尽量用 relay-card（type: "briefing" / "reminder"）返回。'
+      );
       return;
     }
 
@@ -1171,89 +1464,55 @@ export default function App() {
     reminders.filter((r) => !r.completed && r.dayGroup === 'today').length +
     goals.filter((g) => g.status === 'active').length;
 
+  const activeFeedsCount =
+    briefings.length + reminders.filter((r) => !r.completed).length;
+
   const sidebarNavItems: {
     key: TabKey;
     label: string;
-    Icon: React.ComponentType<{ className?: string }>;
+    Icon: React.FC<{ className?: string; active?: boolean }>;
     badge?: number;
-    tintVar: string;
-    accentVar: string;
   }[] = [
-    {
-      key: 'chat',
-      label: '对话',
-      Icon: MessageSquare,
-      tintVar: 'var(--tint-blue)',
-      accentVar: 'var(--accent-indigo)',
-    },
-    {
-      key: 'research',
-      label: '科研',
-      Icon: FlaskConical,
-      badge: researchItems.filter((r) => r.status !== 'archived').length,
-      tintVar: 'var(--tint-violet)',
-      accentVar: 'var(--accent-violet)',
-    },
-    {
-      key: 'health',
-      label: '健康',
-      Icon: HeartPulse,
-      tintVar: 'var(--tint-emerald)',
-      accentVar: 'var(--accent-mint)',
-    },
-    {
-      key: 'goals',
-      label: '目标',
-      Icon: Target,
-      badge: pendingGoalsOrReminders,
-      tintVar: 'var(--tint-red)',
-      accentVar: 'var(--accent-coral)',
-    },
-    {
-      key: 'space',
-      label: '空间',
-      Icon: Compass,
-      tintVar: 'var(--tint-cyan)',
-      accentVar: 'var(--accent-sky)',
-    },
+    { key: 'chat', label: 'Main chat', Icon: NavChatIcon },
+    { key: 'research', label: 'Feeds', Icon: NavFeedsIcon, badge: activeFeedsCount },
+    { key: 'goals', label: 'Goals', Icon: NavGoalsIcon, badge: pendingGoalsOrReminders },
+    { key: 'health', label: 'Health', Icon: NavHealthIcon },
+    { key: 'space', label: 'Library', Icon: NavLibraryIcon },
   ];
 
-  const mobileBottomItems = sidebarNavItems.slice(0, 4);
+  // Exact 4-icon bottom capsule bar matching all 5 Muse screens: Chat / Feeds / Goals / Library
+  const mobileBottomItems: {
+    key: TabKey;
+    label: string;
+    Icon: React.FC<{ className?: string; active?: boolean }>;
+  }[] = [
+    { key: 'chat', label: 'Main chat', Icon: NavChatIcon },
+    { key: 'research', label: 'Feeds', Icon: NavFeedsIcon },
+    { key: 'goals', label: 'Goals', Icon: NavGoalsIcon },
+    { key: 'space', label: 'Library', Icon: NavLibraryIcon },
+  ];
 
-  const activeHeaderTitle =
-    activeTab === 'chat'
-      ? agentProfile.name
-      : activeTab === 'research'
-        ? '科研与论文'
-        : activeTab === 'health'
-          ? '健康与作息'
-          : activeTab === 'goals'
-            ? '目标与日程'
-            : '空间与环境';
-
+  // Muse Sidebar/Drawer
   const renderSidebarContent = (isDrawer: boolean) => (
-    <div className="flex h-full flex-col">
-      {/* Assistant Brand Header + New Chat */}
-      <div className="flex items-center justify-between px-4 pt-5 pb-3">
+    <div className="flex h-full flex-col gap-3 p-3.5">
+      {/* Card 1: Name of AI Header Card */}
+      <div className="flex items-center justify-between gap-2 rounded-[22px] border border-black/[0.08] bg-white px-3.5 py-3 shadow-xs dark:border-white/10 dark:bg-zinc-900">
         <button
           type="button"
           onClick={() => {
             if (isDrawer) setDrawerOpen(false);
             setSettingsOpen(true);
           }}
-          className="flex min-w-0 items-center gap-2.5 rounded-2xl pr-2 text-left transition-opacity hover:opacity-85"
+          className="flex min-w-0 flex-1 items-center gap-2.5 text-left transition-opacity hover:opacity-80"
         >
           <img
             src={avatarSrc}
             alt={agentProfile.name}
-            className="h-9 w-9 shrink-0 rounded-full object-cover ring-1 ring-stone-300/70 dark:ring-zinc-700"
+            className="h-9 w-9 shrink-0 rounded-full object-cover ring-1 ring-black/[0.08] dark:ring-white/15"
           />
           <div className="min-w-0">
-            <div className="truncate text-[15px] font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
+            <div className="truncate text-[15px] font-semibold tracking-tight text-[var(--relay-text)]">
               {agentProfile.name}
-            </div>
-            <div className="truncate text-[11px] text-zinc-400">
-              {agentProfile.subtitle || '私人 AI 助理'}
             </div>
           </div>
         </button>
@@ -1262,18 +1521,17 @@ export default function App() {
           <button
             type="button"
             onClick={handleNewSession}
-            aria-label="新建对话"
-            title="新建对话"
-            className="flex h-9 w-9 items-center justify-center rounded-xl border border-stone-200/90 bg-white text-zinc-700 transition-colors hover:border-[#1B6EF3]/50 hover:text-[#1B6EF3] dark:border-zinc-800 dark:bg-[#181A20] dark:text-zinc-200 dark:hover:border-blue-500/50 dark:hover:text-blue-400"
+            aria-label="新对话"
+            className="flex h-8 w-8 items-center justify-center rounded-full border border-black/[0.08] bg-zinc-50 text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-white/10 dark:bg-zinc-800 dark:text-zinc-200"
           >
-            <Plus className="h-4 w-4" />
+            <Plus weight="bold" className="h-4 w-4" />
           </button>
           {isDrawer && (
             <button
               type="button"
               onClick={() => setDrawerOpen(false)}
-              aria-label="关闭侧边栏"
-              className="flex h-9 w-9 items-center justify-center rounded-xl text-zinc-500 hover:bg-stone-200/60 dark:hover:bg-zinc-800"
+              aria-label="关闭"
+              className="flex h-8 w-8 items-center justify-center rounded-full text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800"
             >
               <X className="h-4 w-4" />
             </button>
@@ -1281,43 +1539,39 @@ export default function App() {
         </div>
       </div>
 
-      {/* 5-Pillar Workspace Navigation as Frosted Magnetic Tiles with Transition-Zone Black Squares */}
-      <nav className="grid grid-cols-2 gap-3 px-3 pt-1 pb-4">
-        {sidebarNavItems.map(({ key, label, Icon, badge, tintVar, accentVar }, navIdx) => {
-          const active = activeTab === key;
-          const isChat = key === 'chat';
-          const navAngles = ['174deg', '162deg', '192deg', '168deg', '186deg'];
+      {/* Card 2: Grouped Navigation Card (Monochrome) */}
+      <nav className="overflow-hidden rounded-[22px] border border-black/[0.08] bg-white shadow-xs divide-y divide-black/[0.06] dark:border-white/10 dark:bg-zinc-900 dark:divide-white/10">
+        {sidebarNavItems.map(({ key, label, Icon, badge }) => {
+          const isLibrary = key === 'space';
+          const active = isLibrary
+            ? libraryPopoverOpen || activeTab === 'space'
+            : activeTab === key;
           return (
             <button
               key={key}
               type="button"
               onClick={() => {
-                setActiveTab(key);
-                if (isDrawer) setDrawerOpen(false);
+                if (isLibrary) {
+                  if (isDrawer) setDrawerOpen(false);
+                  setLibraryPopoverOpen((prev) => !prev);
+                } else {
+                  setLibraryPopoverOpen(false);
+                  setActiveTab(key);
+                  if (isDrawer) setDrawerOpen(false);
+                }
               }}
-              style={
-                {
-                  '--tile-tint': tintVar,
-                  '--tile-angle': navAngles[navIdx % navAngles.length],
-                } as React.CSSProperties
-              }
-              className={`settings-grain-tile relative flex items-center justify-between rounded-2xl px-3 py-2.5 text-[13px] font-medium active:scale-[0.97] whitespace-nowrap ${
-                isChat ? 'col-span-2 min-h-[48px]' : 'col-span-1 min-h-[46px]'
-              } ${
+              className={`flex min-h-[46px] w-full items-center justify-between gap-2.5 px-3.5 py-2.5 text-left transition-colors ${
                 active
-                  ? 'mini-tile-active text-[var(--relay-text)]'
-                  : 'text-[var(--relay-text-muted)] hover:text-[var(--relay-text)]'
+                  ? 'bg-zinc-100/90 text-zinc-950 dark:bg-zinc-800 dark:text-white'
+                  : 'text-[var(--relay-text-muted)] hover:bg-zinc-50 hover:text-[var(--relay-text)] dark:hover:bg-zinc-800/50'
               }`}
             >
-              <GranularDotMatrix pitch={7.5} bandStart={0.44} bandEnd={0.86} />
-              <span className="relative z-10 flex items-center gap-2">
-                <span style={{ color: active ? accentVar : undefined }}>
-                  <Icon className="h-[17px] w-[17px]" />
-                </span>
-                <span>{label}</span>
+              <span className="flex min-w-0 items-center gap-3">
+                <Icon className="h-[19px] w-[19px] shrink-0" active={active} />
+                <span className="truncate text-[14px] font-medium">{label}</span>
               </span>
               {badge !== undefined && badge > 0 && (
-                <span className="relative z-10 font-mono-tabular text-[11px] text-[var(--relay-text-muted)]">
+                <span className="font-mono-tabular text-[11px] text-[var(--relay-text-faint)]">
                   {badge}
                 </span>
               )}
@@ -1326,11 +1580,11 @@ export default function App() {
         })}
       </nav>
 
-      {/* Embedded Session History Slot (Container is flush; each session entry is a frosted magnetic tile) */}
-      <div className="flex min-h-0 flex-1 flex-col border-t border-[var(--relay-tile-border)]/45 px-3 pt-3">
-        <div className="flex items-center justify-between px-1">
-          <span className="text-[11px] font-semibold tracking-wide text-[var(--relay-text-muted)]">
-            会话列表
+      {/* Card 3: CHATS Bordered Session List Card */}
+      <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-[22px] border border-black/[0.08] bg-white shadow-xs dark:border-white/10 dark:bg-zinc-900">
+        <div className="flex items-center justify-between border-b border-black/[0.06] px-3.5 py-2.5 dark:border-white/10">
+          <span className="text-[11px] font-semibold tracking-wider text-[var(--relay-text-muted)] uppercase">
+            CHATS
           </span>
           <div className="flex items-center gap-0.5">
             {config.mode === 'dsh-bridge' && (
@@ -1338,12 +1592,11 @@ export default function App() {
                 <button
                   type="button"
                   onClick={() => setShowSidebarBind((v) => !v)}
-                  aria-label="按 Session ID 接入"
-                  title="按 Session ID 接入"
-                  className={`flex h-7 w-7 items-center justify-center rounded-lg transition-colors ${
+                  aria-label="Session ID"
+                  className={`flex h-7 w-7 items-center justify-center rounded-full transition-colors ${
                     showSidebarBind
-                      ? 'bg-white/15 text-[var(--accent-indigo)]'
-                      : 'text-[var(--relay-text-muted)] hover:bg-white/10 hover:text-[var(--relay-text)]'
+                      ? 'bg-zinc-100 text-[#1B6EF3] dark:bg-zinc-800'
+                      : 'text-[var(--relay-text-muted)] hover:bg-zinc-100 hover:text-[var(--relay-text)] dark:hover:bg-zinc-800'
                   }`}
                 >
                   <Hash className="h-3.5 w-3.5" />
@@ -1352,11 +1605,11 @@ export default function App() {
                   type="button"
                   onClick={() => void handleRefreshSessions(false)}
                   disabled={isLoadingSessions}
-                  aria-label="同步云端会话"
-                  title="同步云端会话"
-                  className="flex h-7 w-7 items-center justify-center rounded-lg text-[var(--relay-text-muted)] transition-colors hover:bg-white/10 hover:text-[var(--accent-indigo)] disabled:opacity-50"
+                  aria-label="同步"
+                  className="flex h-7 w-7 items-center justify-center rounded-full text-zinc-600 transition-colors hover:bg-zinc-100 hover:text-zinc-950 disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                 >
-                  <RefreshCw
+                  <ArrowsClockwise
+                    weight="regular"
                     className={`h-3.5 w-3.5 ${isLoadingSessions ? 'animate-spin' : ''}`}
                   />
                 </button>
@@ -1365,195 +1618,170 @@ export default function App() {
           </div>
         </div>
 
-        {showSidebarBind && config.mode === 'dsh-bridge' && (
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              if (!sidebarBindInput.trim()) return;
-              void handleBindSessionId(sidebarBindInput);
-              setSidebarBindInput('');
-              setShowSidebarBind(false);
-            }}
-            className="mt-2 flex items-center gap-1.5"
-          >
-            <input
-              type="text"
-              value={sidebarBindInput}
-              onChange={(e) => setSidebarBindInput(e.target.value)}
-              placeholder="粘贴 Session ID…"
-              className="min-h-[34px] min-w-0 flex-1 rounded-xl border border-white/15 bg-black/25 px-2.5 font-mono-tabular text-[11px] text-[var(--relay-text)] placeholder:text-[var(--relay-text-faint)] focus:border-white/40 focus:outline-none"
-            />
-            <button
-              type="submit"
-              disabled={!sidebarBindInput.trim()}
-              className="min-h-[34px] shrink-0 rounded-xl bg-white px-2.5 text-[11px] font-semibold text-[#0D1017] disabled:opacity-40"
+        <div className="flex min-h-0 flex-1 flex-col px-2.5 pt-2">
+          {showSidebarBind && config.mode === 'dsh-bridge' && (
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!sidebarBindInput.trim()) return;
+                void handleBindSessionId(sidebarBindInput);
+                setSidebarBindInput('');
+                setShowSidebarBind(false);
+              }}
+              className="mb-2 flex items-center gap-1.5"
             >
-              接入
-            </button>
-          </form>
-        )}
-
-        {sessions.length > 3 && (
-          <div className="relative mt-2">
-            <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-[var(--relay-text-faint)]" />
-            <input
-              type="text"
-              value={sidebarSearch}
-              onChange={(e) => setSidebarSearch(e.target.value)}
-              placeholder="搜索会话…"
-              className="min-h-[34px] w-full rounded-xl border border-white/12 bg-black/25 py-1 pr-2.5 pl-8 text-xs text-[var(--relay-text)] placeholder:text-[var(--relay-text-faint)] focus:border-white/35 focus:outline-none"
-            />
-          </div>
-        )}
-
-        {/* Recessed Embedded Session Scroll Slot containing Transition-Square Session Tiles */}
-        <div className="mt-2.5 flex-1 overflow-y-auto space-y-3 pb-4 pr-0.5">
-          {filteredSidebarSessions.map((s, idx) => {
-            const isActive = s.id === activeSession.id && activeTab === 'chat';
-            const isRenaming = renamingSessionId === s.id;
-            const sessionTints = [
-              'var(--tint-cyan)',
-              'var(--tint-teal)',
-              'var(--tint-violet)',
-              'var(--tint-blue)',
-              'var(--tint-emerald)',
-              'var(--tint-rose)',
-            ];
-            const sessionAngles = ['166deg', '184deg', '172deg', '192deg', '160deg'];
-
-            return (
-              <div
-                key={s.id}
-                style={
-                  {
-                    '--tile-tint': isActive
-                      ? 'var(--tint-blue)'
-                      : sessionTints[idx % sessionTints.length],
-                    '--tile-angle': sessionAngles[idx % sessionAngles.length],
-                  } as React.CSSProperties
-                }
-                className={`settings-grain-tile group flex items-center justify-between gap-1.5 rounded-2xl px-3 py-2.5 ${
-                  isActive
-                    ? 'mini-tile-active text-[var(--relay-text)]'
-                    : 'text-[var(--relay-text-muted)] hover:text-[var(--relay-text)]'
-                }`}
+              <input
+                type="text"
+                value={sidebarBindInput}
+                onChange={(e) => setSidebarBindInput(e.target.value)}
+                placeholder="粘贴 Session ID…"
+                className="min-h-[34px] min-w-0 flex-1 rounded-xl border border-black/[0.09] bg-zinc-50 px-2.5 font-mono-tabular text-[11px] text-[var(--relay-text)] placeholder:text-[var(--relay-text-faint)] focus:border-[#1B6EF3] focus:bg-white focus:outline-none dark:border-white/12 dark:bg-zinc-800"
+              />
+              <button
+                type="submit"
+                disabled={!sidebarBindInput.trim()}
+                className="min-h-[34px] shrink-0 rounded-xl bg-zinc-900 px-2.5 text-[11px] font-semibold text-white disabled:opacity-40 dark:bg-[#1B6EF3]"
               >
-                <GranularDotMatrix pitch={7.5} bandStart={0.44} bandEnd={0.86} />
-                {isRenaming ? (
-                  <div className="relative z-10 flex min-w-0 flex-1 items-center gap-1">
-                    <input
-                      type="text"
-                      autoFocus
-                      value={renameDraft}
-                      onChange={(e) => setRenameDraft(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter') handleRenameSession(s.id, renameDraft);
-                        if (e.key === 'Escape') setRenamingSessionId(null);
-                      }}
-                      onBlur={() => handleRenameSession(s.id, renameDraft)}
-                      className="min-w-0 flex-1 rounded-lg border border-white/40 bg-black/35 px-2 py-0.5 text-xs text-[var(--relay-text)] focus:outline-none"
-                    />
-                    <button
-                      type="button"
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        handleRenameSession(s.id, renameDraft);
-                      }}
-                      aria-label="保存名称"
-                      className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-white text-[#0D1017]"
-                    >
-                      <Check className="h-3 w-3" />
-                    </button>
-                  </div>
-                ) : (
-                  <>
-                    <button
-                      type="button"
-                      onClick={() => void handleSelectSession(s.id)}
-                      className="relative z-10 min-w-0 flex-1 text-left"
-                    >
-                      <div className="truncate text-xs font-medium text-[var(--relay-text)]">
-                        {s.title}
-                      </div>
-                      <div className="mt-0.5 font-mono-tabular text-[10px] text-[var(--relay-text-faint)]">
-                        {s.source === 'remote' ? '云端' : '本地'} · {s.updatedAt}
-                      </div>
-                    </button>
+                接入
+              </button>
+            </form>
+          )}
 
-                    <div className="relative z-10 flex items-center gap-0.5 opacity-70 sm:opacity-0 transition-opacity sm:group-hover:opacity-100">
+          {sessions.length > 3 && (
+            <div className="relative mb-2">
+              <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-[var(--relay-text-faint)]" />
+              <input
+                type="text"
+                value={sidebarSearch}
+                onChange={(e) => setSidebarSearch(e.target.value)}
+                placeholder="搜索会话…"
+                className="min-h-[34px] w-full rounded-xl border border-black/[0.08] bg-zinc-50 py-1 pr-2.5 pl-8 text-xs text-[var(--relay-text)] placeholder:text-[var(--relay-text-faint)] focus:border-[#1B6EF3] focus:bg-white focus:outline-none dark:border-white/10 dark:bg-zinc-800"
+              />
+            </div>
+          )}
+
+          <div className="flex-1 overflow-y-auto space-y-1 pb-2">
+            {filteredSidebarSessions.map((s) => {
+              const isActive = s.id === activeSession.id && activeTab === 'chat';
+              const isRenaming = renamingSessionId === s.id;
+
+              return (
+                <div
+                  key={s.id}
+                  className={`group flex items-center justify-between gap-1.5 rounded-xl px-2.5 py-2 transition-colors ${
+                    isActive
+                      ? 'bg-zinc-100 text-zinc-950 dark:bg-zinc-800 dark:text-white'
+                      : 'text-[var(--relay-text-muted)] hover:bg-zinc-50 hover:text-[var(--relay-text)] dark:hover:bg-zinc-800/50'
+                  }`}
+                >
+                  {isRenaming ? (
+                    <div className="flex min-w-0 flex-1 items-center gap-1">
+                      <input
+                        type="text"
+                        autoFocus
+                        value={renameDraft}
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') handleRenameSession(s.id, renameDraft);
+                          if (e.key === 'Escape') setRenamingSessionId(null);
+                        }}
+                        onBlur={() => handleRenameSession(s.id, renameDraft)}
+                        className="min-w-0 flex-1 rounded-lg border border-[#1B6EF3] bg-white px-2 py-0.5 text-xs text-[var(--relay-text)] focus:outline-none dark:bg-zinc-900"
+                      />
                       <button
                         type="button"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setRenamingSessionId(s.id);
-                          setRenameDraft(s.title);
+                        onMouseDown={(e) => {
+                          e.preventDefault();
+                          handleRenameSession(s.id, renameDraft);
                         }}
-                        aria-label="重命名会话"
-                        className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--relay-text-muted)] hover:bg-white/10 hover:text-[var(--relay-text)]"
+                        aria-label="保存名称"
+                        className="flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-zinc-900 text-white dark:bg-[#1B6EF3]"
                       >
-                        <Pencil className="h-3 w-3" />
+                        <Check className="h-3 w-3" />
                       </button>
-                      {sessions.length > 1 && (
+                    </div>
+                  ) : (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => void handleSelectSession(s.id)}
+                        className="min-w-0 flex-1 text-left"
+                      >
+                        <div className="truncate text-[13px] font-medium text-[var(--relay-text)]">
+                          {s.title}
+                        </div>
+                        <div className="mt-0.5 font-mono-tabular text-[10px] text-[var(--relay-text-faint)]">
+                          {s.source === 'remote' ? '云端' : '本地'} · {s.updatedAt}
+                        </div>
+                      </button>
+
+                      <div className="flex items-center gap-0.5 opacity-70 sm:opacity-0 transition-opacity sm:group-hover:opacity-100">
                         <button
                           type="button"
                           onClick={(e) => {
                             e.stopPropagation();
-                            handleDeleteSession(s.id);
+                            setRenamingSessionId(s.id);
+                            setRenameDraft(s.title);
                           }}
-                          aria-label="删除会话"
-                          className="flex h-6 w-6 items-center justify-center rounded-md text-[var(--relay-text-muted)] hover:bg-white/10 hover:text-[var(--accent-coral)]"
+                          aria-label="重命名会话"
+                          className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-400 hover:bg-zinc-200/70 hover:text-zinc-800 dark:hover:bg-zinc-700 dark:hover:text-zinc-100"
                         >
-                          <Trash2 className="h-3 w-3" />
+                          <Pencil className="h-3 w-3" />
                         </button>
-                      )}
-                    </div>
-                  </>
-                )}
-              </div>
-            );
-          })}
+                        {sessions.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              handleDeleteSession(s.id);
+                            }}
+                            aria-label="删除会话"
+                            className="flex h-6 w-6 items-center justify-center rounded-md text-zinc-400 hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-500/15"
+                          >
+                            <Trash weight="duotone" className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </>
+                  )}
+                </div>
+              );
+            })}
+          </div>
         </div>
       </div>
 
-      {/* Unified Settings Dock as Granular Halftone Magnetic Tile */}
-      <div className="space-y-2 border-t border-[var(--relay-tile-border)]/45 p-3">
+      {/* Bottom Dock: Circular Settings Gear Button */}
+      <div className="flex items-center justify-between gap-2 pt-0.5">
         <button
           type="button"
           onClick={() => {
             if (isDrawer) setDrawerOpen(false);
             setSettingsOpen(true);
           }}
-          style={
-            {
-              '--tile-tint': 'var(--tint-violet)',
-              '--tile-angle': '176deg',
-            } as React.CSSProperties
-          }
-          className="settings-grain-tile flex min-h-[50px] w-full items-center justify-between gap-2.5 rounded-2xl px-3.5 py-2 text-xs font-medium text-[var(--relay-text)] active:scale-[0.98]"
+          aria-label="设置"
+          className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full border border-black/[0.08] bg-white shadow-xs transition-colors hover:bg-zinc-50 active:scale-95 dark:border-white/10 dark:bg-zinc-900"
         >
-          <GranularDotMatrix pitch={8.5} />
-          <span className="relative z-10 flex items-center gap-2.5">
-            <Settings className="h-4 w-4 text-[var(--accent-violet)] shrink-0" />
-            <span>设置</span>
-          </span>
-          <span className="relative z-10 text-[11px] text-[var(--relay-text-muted)]">
-            头像 · 外观 · 连接
-          </span>
+          <NavSettingsIcon className="h-[20px] w-[20px]" />
         </button>
 
-        <PWAInstallButton />
+        <div className="flex-1 min-w-0">
+          <PWAInstallButton />
+        </div>
       </div>
     </div>
   );
 
+  const isInPlaceVoiceActive = inPlaceListening || inPlaceTranscribing;
+
   return (
     <div className="board-backdrop flex h-dvh flex-col overflow-hidden text-[var(--relay-text)] lg:flex-row">
-      {/* Desktop Left Sidebar */}
-      <aside className="hidden lg:flex lg:w-[276px] lg:shrink-0 lg:flex-col border-r border-[var(--relay-tile-border)]/50 bg-[var(--relay-sidebar)]/85 backdrop-blur-xl">
+      {/* Desktop Clean White Sidebar */}
+      <aside className="hidden lg:flex lg:w-[276px] lg:shrink-0 lg:flex-col border-r border-black/[0.06] bg-[var(--relay-bg)] dark:border-white/[0.07]">
         {renderSidebarContent(false)}
       </aside>
 
-      {/* Mobile Slide-Out Frosted Sidebar Drawer */}
+      {/* Mobile Floating Inset White Drawer */}
       <AnimatePresence>
         {drawerOpen && (
           <motion.div
@@ -1561,16 +1789,16 @@ export default function App() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.18 }}
-            className="fixed inset-0 z-50 flex bg-black/45 backdrop-blur-xs lg:hidden"
+            className="fixed inset-0 z-50 flex bg-black/25 p-2.5 backdrop-blur-[2px] lg:hidden"
             onClick={() => setDrawerOpen(false)}
           >
             <motion.aside
-              initial={{ x: '-100%' }}
-              animate={{ x: 0 }}
-              exit={{ x: '-100%' }}
+              initial={{ x: '-100%', opacity: 0.8 }}
+              animate={{ x: 0, opacity: 1 }}
+              exit={{ x: '-100%', opacity: 0.8 }}
               transition={{ type: 'spring', stiffness: 380, damping: 36 }}
               onClick={(e) => e.stopPropagation()}
-              className="h-full w-[82vw] max-w-[304px] border-r border-[var(--relay-tile-border)] bg-[var(--relay-sidebar)]/95 backdrop-blur-xl shadow-2xl"
+              className="h-full w-[82vw] max-w-[310px] overflow-hidden rounded-[28px] border border-black/[0.08] bg-[#F7F8FA] shadow-2xl dark:border-white/10 dark:bg-[#12151B]"
             >
               {renderSidebarContent(true)}
             </motion.aside>
@@ -1578,204 +1806,257 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* Mobile Ultra-Clean Top Header (52px) */}
-      <header className="flex h-[52px] shrink-0 items-center justify-between border-b border-[var(--relay-tile-border)] bg-[var(--relay-bg)]/95 px-3 backdrop-blur-md lg:hidden">
-        <div className="flex min-w-0 items-center gap-2">
-          <button
-            type="button"
-            onClick={() => setDrawerOpen(true)}
-            aria-label="打开侧边栏"
-            className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl text-zinc-700 transition-colors active:scale-95 hover:bg-stone-200/60 dark:text-zinc-200 dark:hover:bg-zinc-800"
-          >
-            <Menu className="h-5 w-5" />
-          </button>
-          <img
-            src={avatarSrc}
-            alt={agentProfile.name}
-            className="h-7 w-7 shrink-0 rounded-full object-cover ring-1 ring-stone-200 dark:ring-zinc-700"
+      {/* Persistent 5-Tab Stage (all panels stay mounted via visibility so scroll & state are preserved) */}
+      <main className="relative min-h-0 flex-1 overflow-hidden">
+        {/* Panel 1: Main Chat */}
+        <div
+          aria-hidden={activeTab !== 'chat'}
+          className={`absolute inset-0 h-full transition-opacity duration-150 ${
+            activeTab === 'chat'
+              ? 'visible opacity-100 z-10'
+              : 'invisible pointer-events-none opacity-0 z-0'
+          }`}
+        >
+          <ChatView
+            messages={messages}
+            sessions={sessions}
+            activeSession={activeSession}
+            agentProfile={agentProfile}
+            isLoadingSessions={isLoadingSessions}
+            isLoadingHistory={isLoadingHistory}
+            config={config}
+            isStreaming={isStreaming}
+            onSendMessage={handleSendMessage}
+            onStopStreaming={handleStopStreaming}
+            onNewSession={handleNewSession}
+            onSelectSession={handleSelectSession}
+            onDeleteSession={handleDeleteSession}
+            onRefreshSessions={() => void handleRefreshSessions(false)}
+            onBindSessionId={(id) => void handleBindSessionId(id)}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onOpenDrawer={() => setDrawerOpen(true)}
+            onToggleSaveBriefing={handleToggleSaveBriefing}
+            onOpenBriefing={(item) => {
+              setSelectedBriefing(item);
+              setSpaceSubTab('library');
+              setActiveTab('space');
+            }}
+            onAskAboutBriefing={handleAskAboutBriefing}
+            onToggleReminder={(item) => handleToggleReminderById(item.id)}
+            onSnoozeReminder={(item) => handleSnoozeReminderById(item.id)}
+            onSyncReminder={handleSyncReminderFromCard}
+            onResolveApproval={handleResolveApproval}
+            onExecuteDeviceAction={(act) => void handleExecuteDeviceAction(act)}
+            onOpenDeviceHub={handleOpenDeviceHub}
+            onPreviewFile={(file) => {
+              setPreviewFile(file);
+              setSpaceSubTab('library');
+              setActiveTab('space');
+            }}
+            onAskAboutFile={handleAskAboutFile}
+            onAskAboutMap={handleAskAboutMap}
+            onPreviewFiveCards={handlePreviewFiveCards}
+            onShowToast={showToast}
           />
-          <span className="truncate text-[15px] font-semibold tracking-tight text-zinc-950 dark:text-zinc-50">
-            {activeHeaderTitle}
-          </span>
         </div>
 
-        <button
-          type="button"
-          onClick={handleNewSession}
-          aria-label="新建对话"
-          className="inline-flex h-9 items-center gap-1 rounded-xl px-2.5 text-xs font-medium text-zinc-700 transition-colors active:scale-95 hover:bg-stone-200/60 dark:text-zinc-200 dark:hover:bg-zinc-800 shrink-0"
+        {/* Panel 2: AI Feeds (Reports & Reminders) */}
+        <div
+          aria-hidden={activeTab !== 'research'}
+          className={`absolute inset-0 h-full overflow-y-auto transition-opacity duration-150 ${
+            activeTab === 'research'
+              ? 'visible opacity-100 z-10'
+              : 'invisible pointer-events-none opacity-0 z-0'
+          }`}
         >
-          <Plus className="h-4 w-4" />
-          <span>新对话</span>
-        </button>
-      </header>
+          <ResearchView
+            briefings={briefings}
+            reminders={reminders}
+            agentProfile={agentProfile}
+            isFetchingDigest={isFetchingDigest}
+            isVoiceActive={isInPlaceVoiceActive}
+            onOpenDrawer={() => setDrawerOpen(true)}
+            onTapAvatar={handleTapAvatarInPlace}
+            onToggleSaveBriefing={handleToggleSaveBriefing}
+            onAskAboutBriefing={handleAskAboutBriefing}
+            onToggleReminder={handleToggleReminderById}
+            onSnoozeReminder={handleSnoozeReminderById}
+            onAskAboutReminder={handleAskAboutReminder}
+            onFetchFreshDigest={handleFetchFreshDigest}
+          />
+        </div>
 
-      {/* Animated Center Stage */}
-      <main className="min-h-0 flex-1 overflow-hidden">
-        <AnimatePresence mode="wait">
-          <motion.div
-            key={activeTab}
-            initial={{ opacity: 0, y: 8 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0, y: -6 }}
-            transition={{ duration: 0.2, ease: [0.22, 1, 0.36, 1] }}
-            className="h-full overflow-y-auto"
-          >
-            {activeTab === 'chat' && (
-              <div className="h-full">
-                <ChatView
-                  messages={messages}
-                  sessions={sessions}
-                  activeSession={activeSession}
-                  agentProfile={agentProfile}
-                  isLoadingSessions={isLoadingSessions}
-                  isLoadingHistory={isLoadingHistory}
-                  config={config}
-                  isStreaming={isStreaming}
-                  onSendMessage={handleSendMessage}
-                  onStopStreaming={handleStopStreaming}
-                  onNewSession={handleNewSession}
-                  onSelectSession={handleSelectSession}
-                  onDeleteSession={handleDeleteSession}
-                  onRefreshSessions={() => void handleRefreshSessions(false)}
-                  onBindSessionId={(id) => void handleBindSessionId(id)}
-                  onOpenSettings={() => setSettingsOpen(true)}
-                  onToggleSaveBriefing={handleToggleSaveBriefing}
-                  onOpenBriefing={(item) => {
-                    setSelectedBriefing(item);
-                    setActiveTab('space');
-                  }}
-                  onAskAboutBriefing={handleAskAboutBriefing}
-                  onToggleReminder={(item) => handleToggleReminderById(item.id)}
-                  onSnoozeReminder={(item) => handleSnoozeReminderById(item.id)}
-                  onSyncReminder={handleSyncReminderFromCard}
-                  onResolveApproval={handleResolveApproval}
-                  onExecuteDeviceAction={(act) => void handleExecuteDeviceAction(act)}
-                  onOpenDeviceHub={handleOpenDeviceHub}
-                  onPreviewFile={(file) => {
-                    setPreviewFile(file);
-                    setSpaceSubTab('library');
-                    setActiveTab('space');
-                  }}
-                  onAskAboutFile={handleAskAboutFile}
-                  onAskAboutMap={handleAskAboutMap}
-                  onPreviewFiveCards={handlePreviewFiveCards}
-                  onShowToast={showToast}
-                />
-              </div>
-            )}
+        {/* Panel 3: Health */}
+        <div
+          aria-hidden={activeTab !== 'health'}
+          className={`absolute inset-0 h-full overflow-y-auto transition-opacity duration-150 ${
+            activeTab === 'health'
+              ? 'visible opacity-100 z-10'
+              : 'invisible pointer-events-none opacity-0 z-0'
+          }`}
+        >
+          <HealthView
+            healthConfig={healthConfig}
+            todayLog={healthLog}
+            agentProfile={agentProfile}
+            isVoiceActive={isInPlaceVoiceActive}
+            onOpenDrawer={() => setDrawerOpen(true)}
+            onTapAvatar={handleTapAvatarInPlace}
+            onUpdateConfig={setHealthConfig}
+            onUpdateTodayLog={setHealthLog}
+            onScheduleBedtimeReminder={handleScheduleBedtimeReminder}
+            onAskAgentHealthCheck={handleAskAgentHealthCheck}
+          />
+        </div>
 
-            {activeTab === 'research' && (
-              <ResearchView
-                items={researchItems}
-                onAddItem={handleAddResearch}
-                onUpdateProgress={handleUpdateResearchProgress}
-                onUpdateStatus={handleUpdateResearchStatus}
-                onUpdateItem={handleUpdateResearchItem}
-                onReorderItems={setResearchItems}
-                onDeleteItem={handleDeleteResearch}
-                onAskAgent={handleAskAboutResearch}
-                onShowToast={showToast}
-              />
-            )}
+        {/* Panel 4: Goals */}
+        <div
+          aria-hidden={activeTab !== 'goals'}
+          className={`absolute inset-0 h-full overflow-y-auto transition-opacity duration-150 ${
+            activeTab === 'goals'
+              ? 'visible opacity-100 z-10'
+              : 'invisible pointer-events-none opacity-0 z-0'
+          }`}
+        >
+          <GoalsView
+            goals={goals}
+            reminders={reminders}
+            config={config}
+            agentProfile={agentProfile}
+            isVoiceActive={isInPlaceVoiceActive}
+            onOpenDrawer={() => setDrawerOpen(true)}
+            onTapAvatar={handleTapAvatarInPlace}
+            onSyncStateWithAgent={handleManualSyncStateWithAgent}
+            onAddGoal={handleAddGoal}
+            onToggleMilestone={handleToggleMilestone}
+            onReorderGoals={setGoals}
+            onDeleteGoal={handleDeleteGoal}
+            onDelegateGoal={handleDelegateGoal}
+            onAddReminder={handleAddReminder}
+            onToggleReminder={handleToggleReminderById}
+            onSnoozeReminder={handleSnoozeReminderById}
+            onDeleteReminder={handleDeleteReminder}
+            onShowToast={showToast}
+          />
+        </div>
 
-            {activeTab === 'health' && (
-              <HealthView
-                healthConfig={healthConfig}
-                todayLog={healthLog}
-                onUpdateConfig={setHealthConfig}
-                onUpdateTodayLog={setHealthLog}
-                onScheduleBedtimeReminder={handleScheduleBedtimeReminder}
-                onAskAgentHealthCheck={handleAskAgentHealthCheck}
-              />
-            )}
-
-            {activeTab === 'goals' && (
-              <GoalsView
-                goals={goals}
-                reminders={reminders}
-                config={config}
-                onAddGoal={handleAddGoal}
-                onToggleMilestone={handleToggleMilestone}
-                onReorderGoals={setGoals}
-                onDeleteGoal={handleDeleteGoal}
-                onDelegateGoal={handleDelegateGoal}
-                onAddReminder={handleAddReminder}
-                onToggleReminder={handleToggleReminderById}
-                onSnoozeReminder={handleSnoozeReminderById}
-                onDeleteReminder={handleDeleteReminder}
-                onShowToast={showToast}
-              />
-            )}
-
-            {activeTab === 'space' && (
-              <SpaceView
-                config={config}
-                initialSubTab={spaceSubTab}
-                deviceContextConfig={deviceContextConfig}
-                nodes={nodes}
-                macros={QUICK_MACROS}
-                files={files}
-                briefings={briefings}
-                selectedBriefing={selectedBriefing}
-                previewFile={previewFile}
-                isFetchingDigest={isFetchingDigest}
-                onUpdateDeviceContextConfig={setDeviceContextConfig}
-                onSendContextToAgent={(promptText) => {
-                  setActiveTab('chat');
-                  void handleSendMessage(promptText);
-                }}
-                onOpenConnection={() => setConnectionOpen(true)}
-                onUpdateNodeIp={handleUpdateNodeIp}
-                onRunMacro={handleRunMacro}
-                onUploadLocalFile={handleUploadLocalFile}
-                onAskAboutFile={handleAskAboutFile}
-                onSelectPreviewFile={setPreviewFile}
-                onFetchFreshDigest={handleFetchFreshDigest}
-                onToggleSaveBriefing={handleToggleSaveBriefing}
-                onSelectBriefing={setSelectedBriefing}
-                onAskAboutBriefing={handleAskAboutBriefing}
-                onShowToast={showToast}
-              />
-            )}
-          </motion.div>
-        </AnimatePresence>
+        {/* Panel 5: Library / Space */}
+        <div
+          aria-hidden={activeTab !== 'space'}
+          className={`absolute inset-0 h-full overflow-y-auto transition-opacity duration-150 ${
+            activeTab === 'space'
+              ? 'visible opacity-100 z-10'
+              : 'invisible pointer-events-none opacity-0 z-0'
+          }`}
+        >
+          <SpaceView
+            config={config}
+            agentProfile={agentProfile}
+            isVoiceActive={isInPlaceVoiceActive}
+            onOpenDrawer={() => setDrawerOpen(true)}
+            onTapAvatar={handleTapAvatarInPlace}
+            initialSubTab={spaceSubTab}
+            deviceContextConfig={deviceContextConfig}
+            nodes={nodes}
+            macros={QUICK_MACROS}
+            files={files}
+            briefings={briefings}
+            selectedBriefing={selectedBriefing}
+            previewFile={previewFile}
+            isFetchingDigest={isFetchingDigest}
+            onUpdateDeviceContextConfig={setDeviceContextConfig}
+            onSendContextToAgent={(promptText) => {
+              setActiveTab('chat');
+              void handleSendMessage(promptText);
+            }}
+            onOpenConnection={() => setConnectionOpen(true)}
+            onUpdateNodeIp={handleUpdateNodeIp}
+            onRunMacro={handleRunMacro}
+            onUploadLocalFile={handleUploadLocalFile}
+            onAskAboutFile={handleAskAboutFile}
+            onSelectPreviewFile={setPreviewFile}
+            onFetchFreshDigest={handleFetchFreshDigest}
+            onToggleSaveBriefing={handleToggleSaveBriefing}
+            onSelectBriefing={setSelectedBriefing}
+            onAskAboutBriefing={handleAskAboutBriefing}
+            onShowToast={showToast}
+          />
+        </div>
       </main>
 
-      {/* Mobile Bottom Tab Bar (Flex-flow so Android insets & keyboard never overlap!) */}
-      <nav
-        aria-label="主导航"
-        className="shrink-0 grid h-[62px] grid-cols-4 items-center gap-1 border-t border-[var(--relay-tile-border)] bg-[var(--relay-bg)]/95 px-2 backdrop-blur-md lg:hidden"
-      >
-        {mobileBottomItems.map(({ key, label, Icon }) => {
-          const active = activeTab === key;
-          return (
-            <motion.button
-              key={key}
-              type="button"
-              whileTap={{ scale: 0.92 }}
-              onClick={() => setActiveTab(key)}
-              className={`relative flex h-[48px] flex-col items-center justify-center gap-0.5 rounded-2xl transition-colors ${
-                active
-                  ? 'text-[var(--accent-indigo)]'
-                  : 'text-[var(--relay-text-muted)]'
-              }`}
-            >
-              {active && (
-                <motion.span
-                  layoutId="mobile-tab-pill"
-                  transition={{ type: 'spring', stiffness: 420, damping: 32 }}
-                  className="absolute inset-0 rounded-2xl border border-[var(--relay-tile-border)] bg-[var(--relay-tile)] shadow-xs"
-                />
-              )}
-              <Icon className="relative z-10 h-[19px] w-[19px]" />
-              <span className="relative z-10 text-[11px] font-medium tracking-tight whitespace-nowrap">
-                {label}
-              </span>
-            </motion.button>
-          );
-        })}
-      </nav>
+      {/* Global In-Place Voice Bar & Mini AI Reply (shown directly on current non-chat tab) */}
+      {activeTab !== 'chat' && (
+        <InPlaceVoiceDock
+          listening={inPlaceListening}
+          transcribing={inPlaceTranscribing}
+          formattedTime={formattedInPlaceTime}
+          transcript={inPlaceTranscript}
+          onCancel={handleCancelInPlaceVoice}
+          onConfirmSend={handleConfirmSendInPlaceVoice}
+          miniReply={inPlaceMiniReply}
+          onDismissMiniReply={() => setInPlaceMiniReplyPrompt(null)}
+          onOpenChat={() => setActiveTab('chat')}
+        />
+      )}
+
+      {/* Floating Library Quick Popover (Left-Middle Sketch Layout) */}
+      <LibraryFloatingPopover
+        open={libraryPopoverOpen}
+        activeDestination={activeLibraryPopoverDest}
+        onClose={() => setLibraryPopoverOpen(false)}
+        onSelect={handleSelectLibraryPopover}
+        variant="mobile-bottom"
+      />
+      <LibraryFloatingPopover
+        open={libraryPopoverOpen}
+        activeDestination={activeLibraryPopoverDest}
+        onClose={() => setLibraryPopoverOpen(false)}
+        onSelect={handleSelectLibraryPopover}
+        variant="desktop-sidebar"
+      />
+
+      {/* Mobile Floating 4-Icon Muse Capsule Navigation Bar (Crisp Monochrome) */}
+      <div className="shrink-0 px-3.5 pt-0.5 pb-2.5 pb-safe lg:hidden">
+        <nav
+          aria-label="主导航"
+          className="muse-pill mx-auto grid h-[56px] max-w-[440px] grid-cols-4 items-center rounded-[28px] px-2"
+        >
+          {mobileBottomItems.map(({ key, label, Icon }) => {
+            const isLibraryBtn = key === 'space';
+            const active = isLibraryBtn
+              ? libraryPopoverOpen || activeTab === 'space' || activeTab === 'health'
+              : !libraryPopoverOpen && activeTab === key;
+            return (
+              <motion.button
+                key={key}
+                type="button"
+                whileTap={{ scale: 0.92 }}
+                onClick={() => {
+                  if (isLibraryBtn) {
+                    setLibraryPopoverOpen((prev) => !prev);
+                  } else {
+                    setLibraryPopoverOpen(false);
+                    setActiveTab(key);
+                  }
+                }}
+                aria-label={label}
+                aria-expanded={isLibraryBtn ? libraryPopoverOpen : undefined}
+                title={label}
+                className="relative flex h-[44px] items-center justify-center rounded-full transition-colors"
+              >
+                {active && (
+                  <motion.span
+                    layoutId="muse-mobile-tab-halo"
+                    transition={{ type: 'spring', stiffness: 420, damping: 32 }}
+                    className="absolute h-[40px] w-[52px] rounded-full bg-zinc-100/95 dark:bg-zinc-800"
+                  />
+                )}
+                <Icon className="relative z-10 h-[22px] w-[22px]" active={active} />
+              </motion.button>
+            );
+          })}
+        </nav>
+      </div>
 
       {/* Unified Sidebar Settings Modal (Avatar/Name, Theme, Connection) */}
       <SettingsModal

@@ -24,13 +24,16 @@ import android.net.Uri;
 import android.os.BatteryManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.AlarmClock;
 import android.provider.CalendarContract;
 import android.provider.DocumentsContract;
+import android.provider.MediaStore;
 import android.provider.Settings;
 import android.provider.Telephony;
+import android.util.Base64;
 
 import androidx.activity.result.ActivityResult;
 import androidx.annotation.NonNull;
@@ -50,6 +53,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
+import java.io.File;
+import java.io.FileOutputStream;
 import java.io.InputStream;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
@@ -1061,6 +1066,102 @@ public class DeviceBridgePlugin extends Plugin {
                 call.resolve(out);
             } catch (Exception e) {
                 call.reject("写入本地文件失败：" + e.getMessage());
+            }
+        });
+    }
+
+    /**
+     * Saves any received image or arbitrary binary file directly into Android Pictures/Relay
+     * or Downloads/Relay via MediaStore (Android 10+) without requiring pre-selected SAF folder.
+     */
+    @PluginMethod
+    public void saveBinaryFile(PluginCall call) {
+        String filename = call.getString("filename", "relay-file.bin");
+        String base64Data = call.getString("base64Data");
+        String mimeType = call.getString("mimeType", "application/octet-stream");
+
+        if (base64Data == null || base64Data.isEmpty()) {
+            call.reject("文件内容为空");
+            return;
+        }
+
+        String safeName = (filename != null && !filename.trim().isEmpty())
+            ? filename.trim().replaceAll("[\\\\/:*?\"<>|]", "_")
+            : "relay-file.bin";
+        String safeMime = (mimeType != null && !mimeType.trim().isEmpty())
+            ? mimeType.trim()
+            : "application/octet-stream";
+
+        ioExecutor.execute(() -> {
+            try {
+                byte[] bytes = Base64.decode(base64Data, Base64.DEFAULT);
+                boolean isImage = safeMime.startsWith("image/");
+
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    ContentResolver resolver = getContext().getContentResolver();
+                    ContentValues values = new ContentValues();
+                    values.put(MediaStore.MediaColumns.DISPLAY_NAME, safeName);
+                    values.put(MediaStore.MediaColumns.MIME_TYPE, safeMime);
+                    String relDir = isImage
+                        ? Environment.DIRECTORY_PICTURES + "/Relay"
+                        : Environment.DIRECTORY_DOWNLOADS + "/Relay";
+                    values.put(MediaStore.MediaColumns.RELATIVE_PATH, relDir);
+                    values.put(MediaStore.MediaColumns.IS_PENDING, 1);
+
+                    Uri collection = isImage
+                        ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                        : MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+                    Uri itemUri = resolver.insert(collection, values);
+                    if (itemUri == null) {
+                        call.reject("系统媒体库创建文件失败");
+                        return;
+                    }
+                    try (OutputStream os = resolver.openOutputStream(itemUri)) {
+                        if (os == null) {
+                            call.reject("无法写入目标文件");
+                            return;
+                        }
+                        os.write(bytes);
+                        os.flush();
+                    }
+                    ContentValues doneValues = new ContentValues();
+                    doneValues.put(MediaStore.MediaColumns.IS_PENDING, 0);
+                    resolver.update(itemUri, doneValues, null, null);
+
+                    JSObject out = new JSObject();
+                    out.put("ok", true);
+                    out.put("uri", itemUri.toString());
+                    out.put("filename", safeName);
+                    out.put("location", isImage ? "相册 / Pictures/Relay" : "下载 / Downloads/Relay");
+                    call.resolve(out);
+                    return;
+                }
+
+                // Fallback for Android 9 and below: app-scoped external Downloads/Relay
+                File baseDir = getContext().getExternalFilesDir(
+                    isImage ? Environment.DIRECTORY_PICTURES : Environment.DIRECTORY_DOWNLOADS
+                );
+                if (baseDir == null) {
+                    baseDir = getContext().getFilesDir();
+                }
+                File targetDir = new File(baseDir, "Relay");
+                if (!targetDir.exists()) {
+                    targetDir.mkdirs();
+                }
+                File outFile = new File(targetDir, safeName);
+                try (FileOutputStream fos = new FileOutputStream(outFile)) {
+                    fos.write(bytes);
+                    fos.flush();
+                }
+
+                JSObject out = new JSObject();
+                out.put("ok", true);
+                out.put("uri", Uri.fromFile(outFile).toString());
+                out.put("filename", safeName);
+                out.put("location", outFile.getAbsolutePath());
+                call.resolve(out);
+            } catch (Exception e) {
+                call.reject("保存文件到手机失败：" + e.getMessage());
             }
         });
     }

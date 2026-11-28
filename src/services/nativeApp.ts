@@ -14,7 +14,7 @@ export function isNativeApp(): boolean {
 
 export async function syncNativeStatusBar(darkMode: boolean): Promise<void> {
   if (!Capacitor.isNativePlatform()) return;
-  const color = darkMode ? '#14171D' : '#F2F0EB';
+  const color = darkMode ? '#0E1014' : '#F6F7F9';
   try {
     await StatusBar.setOverlaysWebView({ overlay: false });
     await StatusBar.setBackgroundColor({ color });

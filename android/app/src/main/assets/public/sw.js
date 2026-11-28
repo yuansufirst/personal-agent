@@ -90,7 +90,7 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "revision": "661ff5229832b2b5494475628a8b8e2d"
   }, {
     "url": "index.html",
-    "revision": "6bbce630379a0ecef3c836cf1b07dc04"
+    "revision": "bbba0ee4b4a01da5f7da2900b8831e0c"
   }, {
     "url": "icon.svg",
     "revision": "c7dde899d57f3985dd3f8b3f3fbe5447"
@@ -104,37 +104,82 @@ define(['./workbox-afac4cd2'], (function (workbox) { 'use strict';
     "url": "src/assets/images/muse_agent_avatar_1795671239700.jpg",
     "revision": "0905e831f7265ddc1f35c607daf1390f"
   }, {
+    "url": "src/assets/images/feed_icon_urgent_1795867370033.jpg",
+    "revision": "cf58904c6b86ff35aa2041a3b57e8fb5"
+  }, {
+    "url": "src/assets/images/feed_icon_reminder_1795867368055.jpg",
+    "revision": "dbcd80261ad8c820f8d082a40d2dd50d"
+  }, {
+    "url": "src/assets/images/feed_icon_paper_1795867366696.jpg",
+    "revision": "66187d6a0d80b5ab1a02535d03465962"
+  }, {
+    "url": "src/assets/images/feed_icon_goal_1795867371552.jpg",
+    "revision": "4bd0a5106af4e3f084ca7630b5f20827"
+  }, {
+    "url": "src/assets/images/feed_icon_dispatch_1795867368132.jpg",
+    "revision": "7127ee4f522b2fced16d652a2217ea13"
+  }, {
     "url": "src/assets/images/briefing_paper_systems_1795619568605.jpg",
     "revision": "d4ffb8e70a2b63fa42cab02e0b42a5b3"
   }, {
     "url": "src/assets/images/briefing_news_desk_1795619568085.jpg",
     "revision": "f0eecb18f50738b8391682ae6d5cf81d"
   }, {
-    "url": "assets/web-CIUpHCt1.js",
+    "url": "assets/web-DTCBFk32.js",
     "revision": null
   }, {
     "url": "assets/muse_agent_avatar_1795671239700-Bt96B81X.jpg",
     "revision": null
   }, {
-    "url": "assets/index-ChY4l-2e.css",
+    "url": "assets/index-D0Iisje6.js",
     "revision": null
   }, {
-    "url": "assets/index-BIxPwlHD.js",
+    "url": "assets/index-BZD4HugA.css",
+    "revision": null
+  }, {
+    "url": "assets/feed_icon_urgent_1795867370033-CV8jtqPf.jpg",
+    "revision": null
+  }, {
+    "url": "assets/feed_icon_reminder_1795867368055-BHVU_gbo.jpg",
+    "revision": null
+  }, {
+    "url": "assets/feed_icon_paper_1795867366696-B8ThVaRg.jpg",
+    "revision": null
+  }, {
+    "url": "assets/feed_icon_goal_1795867371552-DatUhIJ8.jpg",
+    "revision": null
+  }, {
+    "url": "assets/feed_icon_dispatch_1795867368132-CAAqj6UD.jpg",
+    "revision": null
+  }, {
+    "url": "assets/aistudio/image_a958484a.png",
     "revision": null
   }, {
     "url": "assets/aistudio/image_9d42f908.png",
     "revision": null
   }, {
+    "url": "assets/aistudio/image_7f4e83d2.png",
+    "revision": null
+  }, {
     "url": "assets/aistudio/image_74570091.png",
     "revision": null
   }, {
+    "url": "assets/aistudio/image_7419961b.png",
+    "revision": null
+  }, {
     "url": "assets/aistudio/image_6705023a.png",
+    "revision": null
+  }, {
+    "url": "assets/aistudio/image_61c4c607.png",
     "revision": null
   }, {
     "url": "assets/aistudio/image_35bb8bc6.png",
     "revision": null
   }, {
     "url": "assets/aistudio/image_2d336bb4.png",
+    "revision": null
+  }, {
+    "url": "assets/aistudio/image_0f342b38.png",
     "revision": null
   }, {
     "url": "apple-touch-icon.png",

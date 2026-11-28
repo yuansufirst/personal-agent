@@ -8,9 +8,16 @@ import type {
 import { extractRelayCards, type AgentReplyChunk } from './agentClient';
 import {
   createDshWebSocket,
+  httpRequestNativeIfAvailable,
+  isNativeDshSocketAvailable,
   uploadBinaryNativeIfAvailable,
   type DshWebSocketLike,
 } from './nativeSocket';
+import {
+  formatFileBytes,
+  inferMimeTypeFromName,
+  resolveCloudFileUrl,
+} from './fileTransfer';
 
 /**
  * DeepSeek Harness (/api/remote.mux) stream-protocol.ts frames
@@ -210,32 +217,75 @@ async function callDshHttpUnary(
       payload: { args },
     };
 
-    const timed = createTimedAbortController(signal, timeoutMs);
-    let res: Response;
+    const bodyJson = JSON.stringify(body);
+    let status = 0;
+    let ok = false;
+    let rawText = '';
+
+    // Prefer native OkHttp on Android APK (real timeouts + same-origin header, avoids CapacitorHttp quirks)
+    let handledNatively = false;
     try {
-      res = await fetch(url, {
+      const nativeRes = await httpRequestNativeIfAvailable({
+        url,
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(body),
-        signal: timed.signal,
+        body: bodyJson,
+        contentType: 'application/json; charset=utf-8',
+        timeoutMs,
       });
-    } catch (err) {
-      const wasTimeout = timed.didTimeout();
-      timed.cleanup();
-      if (wasTimeout) {
+      if (nativeRes) {
+        handledNatively = true;
+        status = nativeRes.status;
+        ok = nativeRes.ok;
+        rawText = nativeRes.body || '';
+      }
+    } catch (nativeErr) {
+      if (signal?.aborted) {
+        const abortErr = new Error('已取消请求');
+        abortErr.name = 'AbortError';
+        throw abortErr;
+      }
+      const msg = nativeErr instanceof Error ? nativeErr.message : String(nativeErr);
+      if (/timeout|timed out/i.test(msg)) {
         throw new Error(
-          `HTTP POST ${cleanEndpoint} 请求超时（${Math.round(timeoutMs / 1000)}s）。若发送了图片，可能是单次请求体过大或 Cloudflare Tunnel 源站响应过慢。`
+          `HTTP POST ${cleanEndpoint} 请求超时（${Math.round(timeoutMs / 1000)}s）。若发送了图片或文件，可能是体积过大或 Cloudflare Tunnel 源站响应过慢。`
         );
       }
-      if ((err as Error).name === 'AbortError') throw err;
-      const msg = err instanceof Error ? err.message : String(err);
       throw new Error(
-        `HTTP POST ${url} 无法访问（${msg}）。请确认 Cloudflare Tunnel 域名可达且源站允许跨域 CORS。`
+        `HTTP POST ${url} 无法访问（${msg}）。请确认 Cloudflare Tunnel 域名可达且源站正常运行。`
       );
     }
 
-    const rawText = await res.text();
-    timed.cleanup();
+    if (!handledNatively) {
+      const timed = createTimedAbortController(signal, timeoutMs);
+      let res: Response;
+      try {
+        res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: bodyJson,
+          signal: timed.signal,
+        });
+      } catch (err) {
+        const wasTimeout = timed.didTimeout();
+        timed.cleanup();
+        if (wasTimeout) {
+          throw new Error(
+            `HTTP POST ${cleanEndpoint} 请求超时（${Math.round(timeoutMs / 1000)}s）。若发送了图片或文件，可能是单次请求体过大或 Cloudflare Tunnel 源站响应过慢。`
+          );
+        }
+        if ((err as Error).name === 'AbortError') throw err;
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new Error(
+          `HTTP POST ${url} 无法访问（${msg}）。请确认 Cloudflare Tunnel 域名可达且源站允许跨域 CORS。`
+        );
+      }
+
+      status = res.status;
+      ok = res.ok;
+      rawText = await res.text();
+      timed.cleanup();
+    }
+
     let parsed: unknown = rawText;
     try {
       parsed = rawText ? JSON.parse(rawText) : null;
@@ -243,16 +293,16 @@ async function callDshHttpUnary(
       // keep raw text
     }
 
-    if (res.status === 404 || res.status === 405) {
-      lastErr = new Error(`HTTP ${res.status} (${url})`);
+    if (status === 404 || status === 405) {
+      lastErr = new Error(`HTTP ${status} (${url})`);
       continue;
     }
 
-    if (res.status === 413) {
-      throw new Error(`HTTP 413 请求体超过反代/网关上限（${url}），请尝试发送更小尺寸的图片。`);
+    if (status === 413) {
+      throw new Error(`HTTP 413 请求体超过反代/网关上限（${url}），请尝试发送更小体积的文件。`);
     }
-    if (res.status === 524 || res.status === 504) {
-      throw new Error(`HTTP ${res.status} Cloudflare Tunnel 等待源站响应超时（${url}）。`);
+    if (status === 524 || status === 504) {
+      throw new Error(`HTTP ${status} Cloudflare Tunnel 等待源站响应超时（${url}）。`);
     }
 
     const unwrapEnvelope = (node: unknown): unknown => {
@@ -279,13 +329,13 @@ async function callDshHttpUnary(
       return obj;
     };
 
-    if (res.ok) {
+    if (ok) {
       unaryPrefixCache.set(base, prefix);
       return unwrapEnvelope(parsed);
     }
 
-    const errMsg = parseErrorMessage(parsed) || `HTTP ${res.status}`;
-    throw new Error(`HTTP ${res.status} ${errMsg} (${url})`);
+    const errMsg = parseErrorMessage(parsed) || `HTTP ${status}`;
+    throw new Error(`HTTP ${status} ${errMsg} (${url})`);
   }
 
   throw lastErr || new Error(`无法调用 unary 接口 ${cleanEndpoint}`);
@@ -535,18 +585,233 @@ function extractTextParts(content: unknown): string {
   return '';
 }
 
+function buildAttachmentFromPart(
+  raw: Record<string, unknown>,
+  serverUrl?: string,
+  sessionId?: string
+): ChatAttachment | null {
+  const partType = String(raw.type || raw.kind || '').toLowerCase();
+  const isKnownMediaType =
+    partType === 'image' ||
+    partType === 'image_url' ||
+    partType === 'file' ||
+    partType === 'attachment' ||
+    partType === 'resource' ||
+    partType === 'audio' ||
+    partType === 'video';
+
+  const nestedAttachment =
+    raw.attachment && typeof raw.attachment === 'object'
+      ? (raw.attachment as Record<string, unknown>)
+      : null;
+  const nestedFile =
+    raw.file && typeof raw.file === 'object'
+      ? (raw.file as Record<string, unknown>)
+      : null;
+  const refObj = nestedAttachment || nestedFile;
+
+  const imgUrlObj =
+    raw.image_url && typeof raw.image_url === 'object'
+      ? (raw.image_url as Record<string, unknown>)
+      : null;
+  const sourceObj =
+    raw.source && typeof raw.source === 'object'
+      ? (raw.source as Record<string, unknown>)
+      : null;
+
+  const receiptId =
+    (typeof raw.receiptId === 'string' && raw.receiptId) ||
+    (typeof raw.attachmentId === 'string' && raw.attachmentId) ||
+    (typeof raw.fileId === 'string' && raw.fileId) ||
+    (refObj && typeof refObj.receiptId === 'string' && refObj.receiptId) ||
+    (refObj && typeof refObj.attachmentId === 'string' && refObj.attachmentId) ||
+    (refObj && typeof refObj.fileId === 'string' && refObj.fileId) ||
+    undefined;
+
+  const rawUrl =
+    (typeof raw.downloadUrl === 'string' && raw.downloadUrl) ||
+    (typeof raw.url === 'string' && raw.url) ||
+    (typeof raw.imageUrl === 'string' && raw.imageUrl) ||
+    (typeof raw.fileUrl === 'string' && raw.fileUrl) ||
+    (refObj && typeof refObj.downloadUrl === 'string' && refObj.downloadUrl) ||
+    (refObj && typeof refObj.url === 'string' && refObj.url) ||
+    (typeof raw.image === 'string' && /^(https?:|data:|\/)/i.test(raw.image) ? raw.image : '') ||
+    (imgUrlObj && typeof imgUrlObj.url === 'string' ? imgUrlObj.url : '') ||
+    undefined;
+
+  const filePath =
+    (typeof raw.path === 'string' && raw.path) ||
+    (typeof raw.filePath === 'string' && raw.filePath) ||
+    (refObj && typeof refObj.path === 'string' && refObj.path) ||
+    (refObj && typeof refObj.filePath === 'string' && refObj.filePath) ||
+    undefined;
+
+  const rawData =
+    (typeof raw.dataUrl === 'string' && raw.dataUrl) ||
+    (typeof raw.data === 'string' && raw.data) ||
+    (typeof raw.base64 === 'string' && raw.base64) ||
+    (typeof raw.base64Data === 'string' && raw.base64Data) ||
+    (sourceObj && typeof sourceObj.data === 'string' ? sourceObj.data : '') ||
+    (typeof raw.image === 'string' && !/^(https?:|\/)/i.test(raw.image) ? raw.image : '') ||
+    '';
+
+  if (!isKnownMediaType && !receiptId && !rawUrl && !rawData) {
+    return null;
+  }
+  if (!receiptId && !rawUrl && !rawData && !filePath) {
+    return null;
+  }
+
+  let mimeType =
+    (typeof raw.mimeType === 'string' && raw.mimeType) ||
+    (typeof raw.mediaType === 'string' && raw.mediaType) ||
+    (typeof raw.contentType === 'string' && raw.contentType) ||
+    (refObj && typeof refObj.mimeType === 'string' && refObj.mimeType) ||
+    (refObj && typeof refObj.mediaType === 'string' && refObj.mediaType) ||
+    (sourceObj && typeof sourceObj.media_type === 'string' ? sourceObj.media_type : '') ||
+    '';
+
+  if (!mimeType && rawData.startsWith('data:')) {
+    const m = /^data:([^;,]+)/i.exec(rawData);
+    if (m?.[1]) mimeType = m[1];
+  }
+
+  const nameFromPath = filePath ? filePath.split('/').pop() || '' : '';
+  const nameFromUrl = rawUrl && !rawUrl.startsWith('data:')
+    ? rawUrl.split('?')[0].split('/').pop() || ''
+    : '';
+
+  const fallbackExt =
+    partType === 'image' || partType === 'image_url' || mimeType.startsWith('image/')
+      ? 'png'
+      : partType === 'audio' || mimeType.startsWith('audio/')
+        ? 'mp3'
+        : partType === 'video' || mimeType.startsWith('video/')
+          ? 'mp4'
+          : 'bin';
+
+  const name =
+    (typeof raw.filename === 'string' && raw.filename) ||
+    (typeof raw.name === 'string' && raw.name) ||
+    (typeof raw.fileName === 'string' && raw.fileName) ||
+    (refObj && typeof refObj.name === 'string' && refObj.name) ||
+    (refObj && typeof refObj.filename === 'string' && refObj.filename) ||
+    nameFromPath ||
+    (nameFromUrl.includes('.') ? decodeURIComponent(nameFromUrl) : '') ||
+    `cloud-file.${fallbackExt}`;
+
+  if (!mimeType) {
+    mimeType = inferMimeTypeFromName(
+      name,
+      partType === 'image' || partType === 'image_url' ? 'image/png' : 'application/octet-stream'
+    );
+  }
+
+  let dataUrl: string | undefined;
+  let base64Data: string | undefined;
+  if (rawData) {
+    if (rawData.startsWith('data:')) {
+      dataUrl = rawData;
+      const comma = rawData.indexOf(',');
+      base64Data = comma >= 0 ? rawData.slice(comma + 1) : undefined;
+    } else if (rawData.length > 32 && /^[A-Za-z0-9+/=\s]+$/.test(rawData.slice(0, 128))) {
+      base64Data = rawData.replace(/\s+/g, '');
+      dataUrl = `data:${mimeType};base64,${base64Data}`;
+    }
+  } else if (rawUrl && rawUrl.startsWith('data:')) {
+    dataUrl = rawUrl;
+    const comma = rawUrl.indexOf(',');
+    base64Data = comma >= 0 ? rawUrl.slice(comma + 1) : undefined;
+  }
+
+  const resolvedUrl = rawUrl && !rawUrl.startsWith('data:')
+    ? resolveCloudFileUrl(rawUrl, serverUrl)
+    : undefined;
+
+  const sizeRaw = raw.size ?? raw.sizeBytes ?? raw.bytes ?? refObj?.bytes ?? refObj?.size;
+  const size =
+    typeof sizeRaw === 'string' && sizeRaw
+      ? sizeRaw
+      : typeof sizeRaw === 'number'
+        ? formatFileBytes(sizeRaw)
+        : base64Data
+          ? formatFileBytes(Math.round((base64Data.length * 3) / 4))
+          : '云端附件';
+
+  return {
+    name,
+    size,
+    mimeType,
+    dataUrl,
+    base64Data,
+    url: resolvedUrl,
+    receiptId,
+    sessionId,
+    filePath,
+    direction: 'download',
+  };
+}
+
+function extractMediaAttachments(
+  node: unknown,
+  serverUrl?: string,
+  sessionId?: string,
+  depth = 0
+): ChatAttachment[] {
+  if (!node || depth > 5) return [];
+  const out: ChatAttachment[] = [];
+  const seen = new Set<string>();
+
+  const push = (att: ChatAttachment | null) => {
+    if (!att) return;
+    const key = `${att.receiptId || ''}|${att.url || ''}|${att.filePath || ''}|${att.name}|${att.dataUrl?.slice(0, 48) || ''}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(att);
+  };
+
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      for (const a of extractMediaAttachments(item, serverUrl, sessionId, depth + 1)) {
+        push(a);
+      }
+    }
+    return out;
+  }
+
+  if (typeof node === 'object') {
+    const obj = node as Record<string, unknown>;
+    push(buildAttachmentFromPart(obj, serverUrl, sessionId));
+
+    for (const key of ['parts', 'content', 'attachments', 'files', 'images', 'media', 'artifacts', 'output', 'result']) {
+      if (obj[key] && typeof obj[key] === 'object') {
+        for (const a of extractMediaAttachments(obj[key], serverUrl, sessionId, depth + 1)) {
+          push(a);
+        }
+      }
+    }
+  }
+
+  return out;
+}
+
 interface FollowParsedEvent {
   isSnapshot?: boolean;
   delta?: string;
   reasoningDelta?: string;
   toolStep?: AgentToolStep;
+  attachments?: ChatAttachment[];
   fullText?: string;
   done?: boolean;
   idleSignal?: boolean;
   error?: string;
 }
 
-function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent {
+function parseSingleEventObject(
+  obj: Record<string, unknown>,
+  serverUrl?: string,
+  sessionId?: string
+): FollowParsedEvent {
   const frameType =
     (typeof obj.kind === 'string' && obj.kind) ||
     (typeof obj.type === 'string' && obj.type) ||
@@ -575,6 +840,15 @@ function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent
         return { reasoningDelta: String(chunk.text ?? chunk.delta ?? '') };
       }
       if (
+        chunk.type === 'file' ||
+        chunk.type === 'image' ||
+        chunk.type === 'attachment' ||
+        chunk.type === 'resource'
+      ) {
+        const atts = extractMediaAttachments(chunk, serverUrl, sessionId);
+        return atts.length > 0 ? { attachments: atts } : {};
+      }
+      if (
         chunk.type === 'tool-call' ||
         chunk.type === 'tool-input-start' ||
         chunk.type === 'tool-call-start'
@@ -590,14 +864,15 @@ function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent
       if (chunk.type === 'tool-result' || chunk.type === 'tool-output-available') {
         const name = String(chunk.toolName ?? chunk.name ?? 'tool');
         const id = String(chunk.toolCallId ?? chunk.id ?? name);
-        const output =
-          chunk.result || chunk.output
-            ? (typeof (chunk.result ?? chunk.output) === 'string'
-                ? String(chunk.result ?? chunk.output)
-                : JSON.stringify(chunk.result ?? chunk.output)
-              ).slice(0, 260)
-            : undefined;
-        return { toolStep: { id, name, status: 'done', output } };
+        const rawOut = chunk.result ?? chunk.output;
+        const output = rawOut
+          ? (typeof rawOut === 'string' ? rawOut : JSON.stringify(rawOut)).slice(0, 260)
+          : undefined;
+        const atts = extractMediaAttachments(rawOut, serverUrl, sessionId);
+        return {
+          toolStep: { id, name, status: 'done', output },
+          attachments: atts.length > 0 ? atts : undefined,
+        };
       }
       return {};
     }
@@ -643,13 +918,11 @@ function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent
     const isErr = eventType.includes('error') || eventType.includes('fail');
     const detail =
       data.input || data.args ? JSON.stringify(data.input ?? data.args).slice(0, 180) : undefined;
-    const output =
-      data.output || data.result
-        ? (typeof (data.output ?? data.result) === 'string'
-            ? String(data.output ?? data.result)
-            : JSON.stringify(data.output ?? data.result)
-          ).slice(0, 260)
-        : undefined;
+    const rawOut = data.output ?? data.result;
+    const output = rawOut
+      ? (typeof rawOut === 'string' ? rawOut : JSON.stringify(rawOut)).slice(0, 260)
+      : undefined;
+    const atts = isDone ? extractMediaAttachments(rawOut, serverUrl, sessionId) : [];
     return {
       toolStep: {
         id,
@@ -658,6 +931,7 @@ function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent
         detail,
         output,
       },
+      attachments: atts.length > 0 ? atts : undefined,
     };
   }
 
@@ -726,7 +1000,16 @@ function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent
       extractTextParts(data.content) ||
       (innerMessage ? extractTextParts(innerMessage.content) : '') ||
       '';
-    return { fullText: fullText || undefined, done: false };
+    const atts = extractMediaAttachments(
+      dataMessage || innerMessage || inner,
+      serverUrl,
+      sessionId
+    );
+    return {
+      fullText: fullText || undefined,
+      attachments: atts.length > 0 ? atts : undefined,
+      done: false,
+    };
   }
 
   // Turn completion signals
@@ -742,7 +1025,8 @@ function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent
   ) {
     const maybeText =
       extractTextParts(inner.content) || (typeof inner.text === 'string' ? inner.text : undefined);
-    return { fullText: maybeText, done: true };
+    const atts = extractMediaAttachments(inner, serverUrl, sessionId);
+    return { fullText: maybeText, attachments: atts.length > 0 ? atts : undefined, done: true };
   }
 
   // Idle / status signals (only treat as done once assistant text has been received)
@@ -766,7 +1050,11 @@ function parseSingleEventObject(obj: Record<string, unknown>): FollowParsedEvent
   return {};
 }
 
-function extractFollowEvents(rawItem: unknown): FollowParsedEvent[] {
+function extractFollowEvents(
+  rawItem: unknown,
+  serverUrl?: string,
+  sessionId?: string
+): FollowParsedEvent[] {
   if (!rawItem || typeof rawItem !== 'object') return [];
   const obj = rawItem as Record<string, unknown>;
   const frameType =
@@ -788,10 +1076,10 @@ function extractFollowEvents(rawItem: unknown): FollowParsedEvent[] {
   if (batch) {
     return batch
       .filter((e): e is Record<string, unknown> => Boolean(e && typeof e === 'object'))
-      .map((e) => parseSingleEventObject(e));
+      .map((e) => parseSingleEventObject(e, serverUrl, sessionId));
   }
 
-  return [parseSingleEventObject(obj)];
+  return [parseSingleEventObject(obj, serverUrl, sessionId)];
 }
 
 interface MultiplexerStreamHandlers {
@@ -1018,14 +1306,25 @@ export async function listDshSessions(config: ConnectionConfig): Promise<RemoteS
   return Array.from(found.values());
 }
 
-function extractHistoryMessagesFromSnapshot(raw: unknown): ChatMessage[] {
+function extractHistoryMessagesFromSnapshot(
+  raw: unknown,
+  serverUrl?: string,
+  sessionId?: string
+): ChatMessage[] {
   const results: ChatMessage[] = [];
   const seenKeys = new Set<string>();
 
-  const pushMsg = (role: 'user' | 'assistant', text: string, ts?: unknown, idx?: number) => {
+  const pushMsg = (
+    role: 'user' | 'assistant',
+    text: string,
+    ts?: unknown,
+    idx?: number,
+    attachments?: ChatAttachment[]
+  ) => {
     const trimmed = text.trim();
-    if (!trimmed) return;
-    const dedup = `${role}:${trimmed.slice(0, 60)}:${idx ?? results.length}`;
+    const hasAtts = Boolean(attachments && attachments.length > 0);
+    if (!trimmed && !hasAtts) return;
+    const dedup = `${role}:${trimmed.slice(0, 60)}:${idx ?? results.length}:${attachments?.length || 0}`;
     if (seenKeys.has(dedup)) return;
     seenKeys.add(dedup);
     const parsed = role === 'assistant' ? extractRelayCards(trimmed) : { cleanText: trimmed, cards: [] };
@@ -1034,6 +1333,7 @@ function extractHistoryMessagesFromSnapshot(raw: unknown): ChatMessage[] {
       role,
       content: parsed.cleanText || trimmed,
       cards: parsed.cards.length > 0 ? parsed.cards : undefined,
+      attachments: hasAtts ? attachments : undefined,
       timestamp: formatShortTime(ts),
     });
   };
@@ -1069,7 +1369,8 @@ function extractHistoryMessagesFromSnapshot(raw: unknown): ChatMessage[] {
             (typeof inner.text === 'string' ? inner.text : '') ||
             (dataObj ? extractTextParts(dataObj.content) : '') ||
             extractTextParts(inner.parts);
-          pushMsg(roleRaw, text, inner.createdAt ?? inner.timestamp ?? obj.timestamp, i);
+          const atts = extractMediaAttachments(inner, serverUrl, sessionId);
+          pushMsg(roleRaw, text, inner.createdAt ?? inner.timestamp ?? obj.timestamp, i, atts);
           return;
         }
         walk(entry, depth + 1);
@@ -1147,7 +1448,7 @@ export async function loadDshSessionHistory(
           },
           {
             onItem: (item) => {
-              const msgs = extractHistoryMessagesFromSnapshot(item);
+              const msgs = extractHistoryMessagesFromSnapshot(item, config.serverUrl, cleanId);
               if (msgs.length > 0) {
                 collected = msgs;
                 window.setTimeout(finish, 150);
@@ -1170,7 +1471,7 @@ export async function loadDshSessionHistory(
     const res = await callDshHttpUnary(config, 'session/get', {
       request: { sessionId: cleanId },
     });
-    return extractHistoryMessagesFromSnapshot(res);
+    return extractHistoryMessagesFromSnapshot(res, config.serverUrl, cleanId);
   } catch {
     return [];
   }
@@ -1198,26 +1499,92 @@ function buildTextWithFileAttachments(prompt: string, attachments?: ChatAttachme
 
 function extractBase64Payload(att: ChatAttachment): string {
   if (att.base64Data) return att.base64Data;
-  if (att.dataUrl) {
+  if (att.dataUrl && att.dataUrl.startsWith('data:')) {
     const idx = att.dataUrl.indexOf(',');
     return idx >= 0 ? att.dataUrl.slice(idx + 1) : att.dataUrl;
   }
   return '';
 }
 
-function findReceiptIdInPayload(node: unknown): string | undefined {
-  if (!node || typeof node !== 'object') return undefined;
-  const obj = node as Record<string, unknown>;
-  for (const key of ['receiptId', 'attachmentId', 'fileId']) {
-    if (typeof obj[key] === 'string' && obj[key]) return String(obj[key]);
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const str = String(reader.result || '');
+      const comma = str.indexOf(',');
+      resolve(comma >= 0 ? str.slice(comma + 1) : str);
+    };
+    reader.onerror = () => reject(new Error(`读取文件「${file.name}」失败`));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function resolveAttachmentBase64(att: ChatAttachment): Promise<string> {
+  const existing = extractBase64Payload(att);
+  if (existing) return existing;
+  if (att.rawFile) {
+    return fileToBase64(att.rawFile);
   }
-  for (const nestedKey of ['payload', 'result', 'value', 'data', 'receipt', 'file']) {
+  if (att.dataUrl && att.dataUrl.startsWith('blob:')) {
+    const res = await fetch(att.dataUrl);
+    const blob = await res.blob();
+    return fileToBase64(new File([blob], att.name || 'attachment.bin', { type: att.mimeType }));
+  }
+  return '';
+}
+
+function estimateAttachmentBytes(att: ChatAttachment): number {
+  if (typeof att.sizeBytes === 'number' && att.sizeBytes > 0) return att.sizeBytes;
+  if (att.rawFile) return att.rawFile.size;
+  const b64 = extractBase64Payload(att);
+  if (b64) return Math.round((b64.length * 3) / 4);
+  return 0;
+}
+
+interface UploadResult {
+  receiptId?: string;
+  filePath?: string;
+  url?: string;
+  diagnostic?: string;
+  fatal?: boolean;
+}
+
+function findUploadResultInPayload(node: unknown, depth = 0): UploadResult | null {
+  if (!node || typeof node !== 'object' || depth > 5) return null;
+  const obj = node as Record<string, unknown>;
+
+  const receiptId =
+    (typeof obj.receiptId === 'string' && obj.receiptId) ||
+    (typeof obj.attachmentId === 'string' && obj.attachmentId) ||
+    (typeof obj.fileId === 'string' && obj.fileId) ||
+    (typeof obj.receipt === 'string' && obj.receipt) ||
+    (typeof obj.id === 'string' && obj.id && !obj.sessionId ? obj.id : undefined) ||
+    undefined;
+
+  const filePath =
+    (typeof obj.filePath === 'string' && obj.filePath) ||
+    (typeof obj.savedPath === 'string' && obj.savedPath) ||
+    (typeof obj.path === 'string' && obj.path) ||
+    undefined;
+
+  const url =
+    (typeof obj.downloadUrl === 'string' && obj.downloadUrl) ||
+    (typeof obj.fileUrl === 'string' && obj.fileUrl) ||
+    (typeof obj.url === 'string' && obj.url) ||
+    (typeof obj.uri === 'string' && obj.uri) ||
+    undefined;
+
+  if (receiptId || filePath || url) {
+    return { receiptId, filePath, url };
+  }
+
+  for (const nestedKey of ['payload', 'result', 'value', 'data', 'receipt', 'file', 'attachment']) {
     if (obj[nestedKey] && typeof obj[nestedKey] === 'object') {
-      const found = findReceiptIdInPayload(obj[nestedKey]);
+      const found = findUploadResultInPayload(obj[nestedKey], depth + 1);
       if (found) return found;
     }
   }
-  return undefined;
+  return null;
 }
 
 function base64ToUint8Array(base64: string): Uint8Array {
@@ -1231,26 +1598,109 @@ function base64ToUint8Array(base64: string): Uint8Array {
 }
 
 /**
- * Uploads an image or binary file to DeepSeek Harness `POST <prefix>/session/uploadFileBinary`
- * (or unary `session/uploadFile` fallback) with strict per-attempt timeouts so Cloudflare Tunnel
- * uploads never hang silently.
+ * Streams a raw File/Blob/FormData via XMLHttpRequest with real-time upload progress,
+ * exact Content-Length, and dynamic timeout (no base64 memory bloat).
+ */
+function xhrPostBinary(
+  url: string,
+  body: Blob | FormData,
+  contentType: string | null,
+  timeoutMs: number,
+  signal?: AbortSignal,
+  onProgress?: (loaded: number, total: number) => void
+): Promise<{ status: number; ok: boolean; text: string }> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', url, true);
+    xhr.timeout = timeoutMs;
+    if (contentType) {
+      xhr.setRequestHeader('Content-Type', contentType);
+    }
+
+    const onAbort = () => {
+      xhr.abort();
+      const abortErr = new Error('已取消上传');
+      abortErr.name = 'AbortError';
+      reject(abortErr);
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+        return;
+      }
+      signal.addEventListener('abort', onAbort, { once: true });
+    }
+
+    const cleanup = () => {
+      if (signal) signal.removeEventListener('abort', onAbort);
+    };
+
+    if (onProgress && xhr.upload) {
+      xhr.upload.onprogress = (ev) => {
+        if (ev.lengthComputable && ev.total > 0) {
+          onProgress(ev.loaded, ev.total);
+        }
+      };
+    }
+
+    xhr.onload = () => {
+      cleanup();
+      resolve({
+        status: xhr.status,
+        ok: xhr.status >= 200 && xhr.status < 300,
+        text: typeof xhr.responseText === 'string' ? xhr.responseText : '',
+      });
+    };
+
+    xhr.ontimeout = () => {
+      cleanup();
+      reject(new Error(`上传超时（${Math.round(timeoutMs / 1000)}s）`));
+    };
+
+    xhr.onerror = () => {
+      cleanup();
+      reject(new Error('NETWORK_OR_CORS_ERROR'));
+    };
+
+    xhr.send(body);
+  });
+}
+
+const HTTP_413_HINT =
+  'HTTP 413 文件体积超出服务端/反代限制（若云端使用 Nginx 反代，默认 client_max_body_size 仅 1MB，请在 Nginx 配置中添加 client_max_body_size 100m; 并 reload）';
+
+/**
+ * Uploads any image or arbitrary binary file (PDF, Word, Excel, PPT, ZIP, audio, video, etc.)
+ * using the exact official DeepSeek Harness raw-byte route:
+ *   POST /api/session/uploadFileBinary?sessionId=<id>&name=<leafName>
+ *   Content-Type: application/octet-stream
+ *   <raw file bytes>
+ * Streams native File objects directly on Web (zero base64 overhead, live progress, 60-180s timeout).
  */
 async function uploadAttachmentToDsh(
   config: ConnectionConfig,
   sessionId: string,
   att: ChatAttachment,
-  signal?: AbortSignal
-): Promise<{ receiptId: string | null; diagnostic?: string }> {
+  signal?: AbortSignal,
+  onProgress?: (loaded: number, total: number) => void
+): Promise<UploadResult> {
   const base = config.serverUrl.trim().replace(/\/+$/, '');
-  const base64Data = extractBase64Payload(att);
-  if (!base || !base64Data) return { receiptId: null, diagnostic: '附件数据为空' };
+  const hasPayload = Boolean(att.rawFile || att.base64Data || att.dataUrl);
+  if (!base || !hasPayload) return { diagnostic: '附件数据为空', fatal: true };
 
-  const mimeType = att.mimeType || 'application/octet-stream';
-  const filename = att.name || 'attachment.jpg';
-  const query = new URLSearchParams({
+  const mimeType = att.mimeType || inferMimeTypeFromName(att.name || 'attachment.bin');
+  const filename = (att.name || 'attachment.bin').replace(/^.*[\\/]/, '');
+  const byteSize = estimateAttachmentBytes(att);
+  // Dynamic timeout: 60s baseline + ~2s per 100KB, capped at 180s
+  const uploadTimeoutMs = Math.min(
+    180_000,
+    Math.max(60_000, 45_000 + Math.ceil(byteSize / 102_400) * 2000)
+  );
+
+  // Official DSH (@deepseek-ai/dsh-client-file-upload) uses `sessionId` and `name`
+  const officialQuery = new URLSearchParams({
     sessionId,
-    filename,
-    mimeType,
+    name: filename,
   }).toString();
 
   const cachedPrefix = unaryPrefixCache.get(base);
@@ -1258,11 +1708,30 @@ async function uploadAttachmentToDsh(
     ? [cachedPrefix, cachedPrefix === '/api' ? '/api/remote' : '/api']
     : ['/api', '/api/remote'];
 
+  const nativeAvailable = isNativeDshSocketAvailable();
+  let cachedBase64: string | null = null;
+  const getBase64 = async (): Promise<string> => {
+    if (cachedBase64 === null) {
+      cachedBase64 = await resolveAttachmentBase64(att);
+    }
+    return cachedBase64;
+  };
+
+  let cachedBlob: Blob | null = att.rawFile || null;
+  const getRawBlob = async (): Promise<Blob> => {
+    if (cachedBlob) return cachedBlob;
+    const b64 = await getBase64();
+    const bytes = base64ToUint8Array(b64);
+    cachedBlob = new Blob([bytes as unknown as BlobPart], { type: mimeType });
+    return cachedBlob;
+  };
+
+  // Official DSH uploadFileBinary strictly expects raw binary with Content-Type: application/octet-stream
   const modes: Array<'raw' | 'multipart'> = ['raw', 'multipart'];
   let lastDiag = '';
 
   for (const prefix of prefixes) {
-    const urlWithQuery = `${base}${prefix}/session/uploadFileBinary?${query}`;
+    const urlWithQuery = `${base}${prefix}/session/uploadFileBinary?${officialQuery}`;
     let routeNotFound = false;
 
     for (const mode of modes) {
@@ -1273,238 +1742,314 @@ async function uploadAttachmentToDsh(
       }
 
       try {
-        // 1. Native Android APK path via OkHttp (dedicated httpClient with finite timeouts & ASCII-encoded headers)
-        const nativeRes = await uploadBinaryNativeIfAvailable({
-          url: urlWithQuery,
-          base64Data,
-          mimeType,
-          filename,
-          sessionId,
-          mode,
-        });
+        // 1. Native Android APK path via OkHttp (with 60-180s write/read timeout)
+        if (nativeAvailable) {
+          const base64Data = await getBase64();
+          if (!base64Data) return { diagnostic: '无法读取附件二进制数据', fatal: true };
+          const nativeRes = await uploadBinaryNativeIfAvailable({
+            url: urlWithQuery,
+            base64Data,
+            mimeType: mode === 'raw' ? 'application/octet-stream' : mimeType,
+            filename,
+            sessionId,
+            mode,
+            timeoutMs: uploadTimeoutMs,
+          });
 
-        if (nativeRes) {
-          if (nativeRes.ok && nativeRes.body) {
-            try {
-              const parsed = JSON.parse(nativeRes.body);
-              const receiptId = findReceiptIdInPayload(parsed);
-              if (receiptId) {
-                unaryPrefixCache.set(base, prefix);
-                return { receiptId };
+          if (nativeRes) {
+            if (nativeRes.ok && nativeRes.body) {
+              try {
+                const parsed = JSON.parse(nativeRes.body);
+                const found = findUploadResultInPayload(parsed);
+                if (found) {
+                  unaryPrefixCache.set(base, prefix);
+                  return found;
+                }
+              } catch {
+                // ignore non-json
               }
-            } catch {
-              // ignore non-json
             }
+            const snippet = nativeRes.body ? ` ${nativeRes.body.slice(0, 140)}` : '';
+            lastDiag = `${prefix}/session/uploadFileBinary (${mode}) -> HTTP ${nativeRes.status}${snippet}`;
+            if (nativeRes.status === 404 || nativeRes.status === 405) {
+              routeNotFound = true;
+              break;
+            }
+            if (nativeRes.status === 413) {
+              return { diagnostic: HTTP_413_HINT, fatal: true };
+            }
+            if (nativeRes.status === 401 || nativeRes.status === 403) {
+              return { diagnostic: `HTTP ${nativeRes.status} 上传被服务端拒绝${snippet}`, fatal: true };
+            }
+            continue;
           }
-          lastDiag = `${prefix}/session/uploadFileBinary (${mode}) -> HTTP ${nativeRes.status}`;
-          if (nativeRes.status === 404 || nativeRes.status === 405) {
-            routeNotFound = true;
-            break;
-          }
-          if (nativeRes.status === 413) {
-            return { receiptId: null, diagnostic: 'HTTP 413 图片体积超出服务端限制' };
-          }
-          continue;
         }
 
-        // 2. Standard Web/PWA path via fetch with 18s per-attempt timeout
-        const timed = createTimedAbortController(signal, 18000);
-        const bytes = base64ToUint8Array(base64Data);
-        let res: Response;
-        try {
-          if (mode === 'raw') {
-            res = await fetch(urlWithQuery, {
-              method: 'POST',
-              headers: {
-                'Content-Type': mimeType,
-                'X-File-Name': encodeURIComponent(filename),
-                'X-Session-Id': sessionId,
-              },
-              body: bytes as unknown as BodyInit,
-              signal: timed.signal,
-            });
-          } else {
-            const form = new FormData();
-            form.append('sessionId', sessionId);
-            form.append('filename', filename);
-            form.append('mimeType', mimeType);
-            form.append('file', new Blob([bytes as unknown as BlobPart], { type: mimeType }), filename);
-            res = await fetch(urlWithQuery, {
-              method: 'POST',
-              body: form,
-              signal: timed.signal,
-            });
-          }
-        } finally {
-          timed.cleanup();
+        // 2. Standard Web/PWA path via XMLHttpRequest streaming raw File/Blob directly
+        const blob = await getRawBlob();
+        let res: { status: number; ok: boolean; text: string };
+        if (mode === 'raw') {
+          res = await xhrPostBinary(
+            urlWithQuery,
+            blob,
+            'application/octet-stream',
+            uploadTimeoutMs,
+            signal,
+            onProgress
+          );
+        } else {
+          const form = new FormData();
+          form.append('sessionId', sessionId);
+          form.append('name', filename);
+          form.append('file', blob, filename);
+          res = await xhrPostBinary(urlWithQuery, form, null, uploadTimeoutMs, signal, onProgress);
         }
 
         if (res.ok) {
-          const text = await res.text();
           try {
-            const parsed = JSON.parse(text);
-            const receiptId = findReceiptIdInPayload(parsed);
-            if (receiptId) {
+            const parsed = JSON.parse(res.text);
+            const found = findUploadResultInPayload(parsed);
+            if (found) {
               unaryPrefixCache.set(base, prefix);
-              return { receiptId };
+              return found;
             }
           } catch {
             // ignore
           }
         }
-        lastDiag = `${prefix}/session/uploadFileBinary (${mode}) -> HTTP ${res.status}`;
+        const snippet = res.text ? ` ${res.text.slice(0, 140)}` : '';
+        lastDiag = `${prefix}/session/uploadFileBinary (${mode}) -> HTTP ${res.status}${snippet}`;
         if (res.status === 404 || res.status === 405) {
           routeNotFound = true;
           break;
         }
         if (res.status === 413) {
-          return { receiptId: null, diagnostic: 'HTTP 413 图片体积超出服务端限制' };
+          return { diagnostic: HTTP_413_HINT, fatal: true };
+        }
+        if (res.status === 401 || res.status === 403) {
+          return { diagnostic: `HTTP ${res.status} 上传被服务端拒绝${snippet}`, fatal: true };
         }
       } catch (err) {
         if ((err as Error).name === 'AbortError' && signal?.aborted) throw err;
-        lastDiag = `${prefix}/session/uploadFileBinary (${mode}) -> ${err instanceof Error ? err.message : '网络异常'}`;
+        const rawErrMsg = err instanceof Error ? err.message : '网络异常';
+        if (rawErrMsg === 'NETWORK_OR_CORS_ERROR') {
+          const msg =
+            byteSize > 1_000_000
+              ? '上传被中断或触发反代体积限制（浏览器下 Nginx 默认 1MB 限制返回的 413 无 CORS 头也会表现为网络错误，请检查 Nginx client_max_body_size 或改用 Android APK 直连）'
+              : '网络中断或跨域被拦截（请检查 Cloudflare Tunnel 与源站状态）';
+          lastDiag = `${prefix}/session/uploadFileBinary (${mode}) -> ${msg}`;
+          if (byteSize > 1_000_000) {
+            return { diagnostic: lastDiag, fatal: true };
+          }
+        } else {
+          lastDiag = `${prefix}/session/uploadFileBinary (${mode}) -> ${rawErrMsg}`;
+          if (byteSize > 1_500_000 && lastDiag.includes('超时')) {
+            return { diagnostic: lastDiag, fatal: true };
+          }
+        }
       }
     }
 
     if (!routeNotFound) {
-      // Endpoint exists on this prefix; don't waste time probing alternate prefix
       break;
     }
   }
 
-  // Fallback: try unary JSON uploadFile RPC if binary upload route was absent or rejected
-  try {
-    const unaryRes = await callDshHttpUnary(
-      config,
-      'session/uploadFile',
-      {
-        request: {
-          sessionId,
-          filename,
-          mimeType,
-          dataBase64: base64Data,
-        },
-      },
-      signal,
-      18000
-    );
-    const receiptId = findReceiptIdInPayload(unaryRes);
-    if (receiptId) return { receiptId };
-  } catch {
-    // Fall back to inline multimodal content in session/prompt
+  // Fallback: try unary JSON uploadFile RPC ONLY for small files (<= 2 MB)
+  if (byteSize <= 2 * 1024 * 1024) {
+    const base64Data = await getBase64();
+    if (base64Data) {
+      const unaryPayloads: Array<Record<string, unknown>> = [
+        { sessionId, name: filename, mediaType: mimeType, data: base64Data },
+        { sessionId, filename, mimeType, dataBase64: base64Data },
+      ];
+      for (const req of unaryPayloads) {
+        try {
+          const unaryRes = await callDshHttpUnary(
+            config,
+            'session/uploadFile',
+            { request: req },
+            signal,
+            25000
+          );
+          const found = findUploadResultInPayload(unaryRes);
+          if (found) return found;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : '';
+          if (msg.includes('413')) {
+            return { diagnostic: HTTP_413_HINT, fatal: true };
+          }
+          if (msg.includes('404') || msg.includes('405') || msg.includes('超时')) {
+            break;
+          }
+        }
+      }
+    }
   }
 
-  return { receiptId: null, diagnostic: lastDiag || '二进制上传接口不可用，已改用内联传输' };
+  return { diagnostic: lastDiag || '二进制上传接口不可用' };
+}
+
+interface UploadedAttachmentEntry {
+  receiptId?: string;
+  filePath?: string;
+  url?: string;
+  att: ChatAttachment;
+}
+
+interface PromptPayloadCandidate {
+  content: Record<string, unknown>[];
+  submittedAttachments?: Record<string, unknown>[];
 }
 
 function buildMultimodalContentCandidates(
   prompt: string,
   attachments?: ChatAttachment[],
-  uploadedReceipts?: Array<{ receiptId: string; att: ChatAttachment }>
-): Record<string, unknown>[][] {
-  const combinedText = buildTextWithFileAttachments(prompt, attachments);
+  uploadedEntries?: UploadedAttachmentEntry[]
+): PromptPayloadCandidate[] {
+  const baseText = buildTextWithFileAttachments(prompt, attachments);
   const mediaAttachments = (attachments || []).filter(
-    (att) => !att.textContent && (att.base64Data || att.dataUrl)
+    (att) => !att.textContent && Boolean(att.rawFile || att.base64Data || att.dataUrl)
   );
 
   if (mediaAttachments.length === 0) {
-    return [[{ type: 'text', text: combinedText }]];
+    return [{ content: [{ type: 'text', text: baseText }] }];
   }
 
-  const candidates: Record<string, unknown>[][] = [];
+  // Append server-side file path / URL notes when upload returned a path or download URL
+  const pathNotes = (uploadedEntries || [])
+    .filter((e) => e.filePath || e.url)
+    .map(
+      (e) =>
+        `[已上传附件: ${e.att.name} (${e.att.mimeType}, ${e.att.size})${
+          e.filePath ? ` · 云端路径: ${e.filePath}` : ''
+        }${e.url ? ` · 链接: ${e.url}` : ''}]`
+    );
+  const combinedText = pathNotes.length > 0 ? `${baseText}\n\n${pathNotes.join('\n')}` : baseText;
 
-  // #1 Preferred official DeepSeek Harness format: staged receiptId via uploadFileBinary
-  if (uploadedReceipts && uploadedReceipts.length === mediaAttachments.length) {
-    candidates.push([
-      ...uploadedReceipts.map((r) => ({ type: 'file', receiptId: r.receiptId })),
-      { type: 'text', text: combinedText },
-    ]);
-    candidates.push([
-      { type: 'text', text: combinedText },
-      ...uploadedReceipts.map((r) => ({
-        type: r.att.mimeType.startsWith('image/') ? 'image' : 'file',
-        receiptId: r.receiptId,
-      })),
-    ]);
+  const candidates: PromptPayloadCandidate[] = [];
+  const receiptEntries = (uploadedEntries || []).filter((e) => Boolean(e.receiptId));
+  const allAreImages = mediaAttachments.every((a) => a.mimeType.startsWith('image/'));
+
+  // #1 Official DeepSeek Harness format: staged receiptId via POST /api/session/uploadFileBinary
+  // Works for BOTH images and arbitrary files (PDF, Word, Excel, PPT, ZIP, audio, video, etc.)
+  if (receiptEntries.length === mediaAttachments.length) {
+    const fileParts = receiptEntries.map((r) => ({ type: 'file', receiptId: r.receiptId }));
+    candidates.push(
+      { content: [...fileParts, { type: 'text', text: combinedText }] },
+      { content: [{ type: 'text', text: combinedText }, ...fileParts] },
+      { content: [{ type: 'text', text: combinedText }], submittedAttachments: fileParts }
+    );
+  } else if (pathNotes.length === mediaAttachments.length) {
+    candidates.push({ content: [{ type: 'text', text: combinedText }] });
   }
 
-  const makeParts = (
-    mapper: (att: ChatAttachment) => Record<string, unknown>
-  ): Record<string, unknown>[] => [
-    { type: 'text', text: combinedText },
-    ...mediaAttachments.map(mapper),
-  ];
-
-  candidates.push(
-    makeParts((att) =>
-      att.mimeType.startsWith('image/')
-        ? {
-            type: 'image',
-            mimeType: att.mimeType,
-            data: att.base64Data || att.dataUrl || '',
-          }
-        : {
-            type: 'file',
-            filename: att.name,
-            mimeType: att.mimeType,
-            data: att.base64Data || att.dataUrl || '',
-          }
-    ),
-    makeParts((att) =>
-      att.mimeType.startsWith('image/')
-        ? {
-            type: 'image',
-            mediaType: att.mimeType,
-            data: att.base64Data || att.dataUrl || '',
-          }
-        : {
-            type: 'file',
-            filename: att.name,
-            mediaType: att.mimeType,
-            data: att.base64Data || att.dataUrl || '',
-          }
-    ),
-    makeParts((att) =>
-      att.mimeType.startsWith('image/')
-        ? {
-            type: 'image',
-            url: att.dataUrl || '',
-            mimeType: att.mimeType,
-          }
-        : {
-            type: 'file',
-            filename: att.name,
-            url: att.dataUrl || '',
-            mediaType: att.mimeType,
-          }
-    ),
-    makeParts((att) => ({
+  // #2 Official DeepSeek Harness inline image parts (`mediaType` + `data` + `name`)
+  if (allAreImages) {
+    const officialInlineImages = mediaAttachments.map((att) => ({
       type: 'image',
-      image: att.dataUrl || att.base64Data || '',
-      mimeType: att.mimeType,
-    })),
-    makeParts((att) => ({
-      type: 'image_url',
-      image_url: { url: att.dataUrl || '' },
-    })),
-    makeParts((att) => ({
-      type: 'image',
-      source: {
-        type: 'base64',
-        media_type: att.mimeType,
-        data: att.base64Data || '',
+      mediaType: att.mimeType,
+      data: extractBase64Payload(att),
+      name: att.name,
+    }));
+    candidates.push(
+      { content: [{ type: 'text', text: combinedText }, ...officialInlineImages] },
+      { content: [{ type: 'text', text: combinedText }], submittedAttachments: officialInlineImages },
+      {
+        content: [
+          { type: 'text', text: combinedText },
+          ...mediaAttachments.map((att) => ({
+            type: 'image',
+            mediaType: att.mimeType,
+            data: extractBase64Payload(att),
+          })),
+        ],
       },
-    }))
-  );
+      {
+        content: [
+          { type: 'text', text: combinedText },
+          ...mediaAttachments.map((att) => ({
+            type: 'image',
+            mimeType: att.mimeType,
+            data: extractBase64Payload(att),
+          })),
+        ],
+      },
+      {
+        content: [
+          { type: 'text', text: combinedText },
+          ...mediaAttachments.map((att) => {
+            const b64 = extractBase64Payload(att);
+            return {
+              type: 'image_url',
+              image_url: {
+                url:
+                  att.dataUrl && att.dataUrl.startsWith('data:')
+                    ? att.dataUrl
+                    : b64
+                      ? `data:${att.mimeType};base64,${b64}`
+                      : '',
+              },
+            };
+          }),
+        ],
+      }
+    );
+  } else if (receiptEntries.length < mediaAttachments.length) {
+    // Non-image binary files when uploadFileBinary was unavailable: try structured file parts
+    candidates.push(
+      {
+        content: [
+          { type: 'text', text: combinedText },
+          ...mediaAttachments.map((att) =>
+            att.mimeType.startsWith('image/')
+              ? {
+                  type: 'image',
+                  mediaType: att.mimeType,
+                  data: extractBase64Payload(att),
+                  name: att.name,
+                }
+              : {
+                  type: 'file',
+                  name: att.name,
+                  filename: att.name,
+                  mediaType: att.mimeType,
+                  data: extractBase64Payload(att),
+                }
+          ),
+        ],
+      },
+      {
+        content: [
+          { type: 'text', text: combinedText },
+          ...mediaAttachments.map((att) =>
+            att.mimeType.startsWith('image/')
+              ? {
+                  type: 'image',
+                  mimeType: att.mimeType,
+                  data: extractBase64Payload(att),
+                }
+              : {
+                  type: 'file',
+                  filename: att.name,
+                  mimeType: att.mimeType,
+                  data: extractBase64Payload(att),
+                }
+          ),
+        ],
+      }
+    );
+  }
 
   return candidates;
 }
 
 /**
  * Full DeepSeek Harness Typert Gateway conversation turn:
- * 1. Unary HTTP POST `session/create` (never via WS stream carrier) to obtain/reuse `sessionId`
- * 2. Stream WS `/api/remote.mux` `session/follow` (`assistantStream: true`) to subscribe to live chunks
- * 3. Unary HTTP POST `session/prompt` (with `args.request` and automatic multimodal adaptation)
+ * 1. Unary HTTP POST `session/create` to obtain/reuse `sessionId`
+ * 2. Upload any images or arbitrary files BEFORE opening WS follow
+ * 3. Stream WS `/api/remote.mux` `session/follow` (`assistantStream: true`) to subscribe to live chunks & media
+ * 4. Unary HTTP POST `session/prompt` (with automatic multimodal & arbitrary-file adaptation)
  */
 export function streamDshMuxReply(
   prompt: string,
@@ -1528,6 +2073,8 @@ export function streamDshMuxReply(
     let accumulated = '';
     let accumulatedThinking = '';
     const toolStepsMap = new Map<string, AgentToolStep>();
+    const receivedAttachments: ChatAttachment[] = [];
+    const receivedAttKeys = new Set<string>();
     const startedAt = performance.now();
     let ws: DshWebSocketLike | null = null;
     let mux: SingleTurnMuxHelper | null = null;
@@ -1535,14 +2082,32 @@ export function streamDshMuxReply(
     let sawPostPromptEvent = false;
     const recentRawFrames: string[] = [];
 
+    const appendReceivedAttachments = (atts?: ChatAttachment[]) => {
+      if (!atts || atts.length === 0) return false;
+      let added = false;
+      for (const att of atts) {
+        const key = `${att.receiptId || ''}|${att.url || ''}|${att.filePath || ''}|${att.name}|${att.dataUrl?.slice(0, 48) || ''}`;
+        if (!receivedAttKeys.has(key)) {
+          receivedAttKeys.add(key);
+          receivedAttachments.push(att);
+          added = true;
+        }
+      }
+      return added;
+    };
+
     const emitUpdate = (done: boolean) => {
-      const { cleanText, cards } = extractRelayCards(accumulated);
+      const { cleanText, cards, syncPayloads } = extractRelayCards(accumulated);
       const steps = Array.from(toolStepsMap.values()).map((s) =>
         done && s.status === 'running' ? { ...s, status: 'done' as const } : s
       );
       onChunk({
-        text: done ? cleanText || accumulated || '（Agent 已完成本轮回复）' : cleanText,
+        text: done
+          ? cleanText || accumulated || (receivedAttachments.length > 0 ? '已为你发送以下文件：' : '（Agent 已完成本轮回复）')
+          : cleanText,
         cards,
+        syncPayloads: syncPayloads.length > 0 ? syncPayloads : undefined,
+        attachments: receivedAttachments.length > 0 ? [...receivedAttachments] : undefined,
         thinking: accumulatedThinking || undefined,
         toolSteps: steps.length > 0 ? steps : undefined,
         elapsedMs: Math.round(performance.now() - startedAt),
@@ -1594,9 +2159,10 @@ export function streamDshMuxReply(
     let connectTimer = 0;
 
     const mediaAttachments = (options?.attachments || []).filter(
-      (att) => !att.textContent && (att.base64Data || att.dataUrl)
+      (att) => !att.textContent && Boolean(att.rawFile || att.base64Data || att.dataUrl)
     );
     const hasMedia = mediaAttachments.length > 0;
+    const allImages = hasMedia && mediaAttachments.every((a) => a.mimeType.startsWith('image/'));
     let lastUploadDiagnostic = '';
     let idleTimer = window.setTimeout(() => {}, 0);
     let currentIdleMs = hasMedia ? 120000 : 60000;
@@ -1605,9 +2171,8 @@ export function streamDshMuxReply(
       currentIdleMs = ms;
       window.clearTimeout(idleTimer);
       idleTimer = window.setTimeout(() => {
-        if (accumulated) {
-          const { cleanText, cards } = extractRelayCards(accumulated);
-          onChunk({ text: cleanText, cards, done: true });
+        if (accumulated || receivedAttachments.length > 0) {
+          emitUpdate(true);
           succeed();
         } else {
           const sample =
@@ -1674,38 +2239,83 @@ export function streamDshMuxReply(
 
         options?.onSessionResolved?.(sessionId);
 
-        // Step 2: Upload binary/image attachments BEFORE opening WS follow
+        // Step 2: Upload binary/image/arbitrary attachments BEFORE opening WS follow
         // so Cloudflare Tunnel doesn't idle/drop the WebSocket while media is uploading
-        const uploadedReceipts: Array<{ receiptId: string; att: ChatAttachment }> = [];
+        const uploadedEntries: UploadedAttachmentEntry[] = [];
+        let effectiveAttachments = options?.attachments;
         if (hasMedia) {
+          const mediaLabel = allImages ? '图片' : '文件';
           toolStepsMap.set('relay-upload', {
             id: 'relay-upload',
-            name: `上传图片 (${mediaAttachments.length})`,
+            name: `上传${mediaLabel} (${mediaAttachments.length})`,
             status: 'running',
             detail: mediaAttachments.map((a) => `${a.name} · ${a.size}`).join(', '),
           });
           emitUpdate(false);
 
-          for (const att of mediaAttachments) {
-            const res = await uploadAttachmentToDsh(config, sessionId, att, signal);
-            if (res.receiptId) {
-              uploadedReceipts.push({ receiptId: res.receiptId, att });
-            } else if (res.diagnostic) {
-              lastUploadDiagnostic = res.diagnostic;
+          for (let i = 0; i < mediaAttachments.length; i++) {
+            const att = mediaAttachments[i];
+            let lastEmit = 0;
+            const res = await uploadAttachmentToDsh(config, sessionId, att, signal, (loaded, total) => {
+              const now = performance.now();
+              if (now - lastEmit < 180 && loaded < total) return;
+              lastEmit = now;
+              const pct = Math.min(100, Math.round((loaded / total) * 100));
+              toolStepsMap.set('relay-upload', {
+                id: 'relay-upload',
+                name: `正在上传${mediaLabel} ${pct}%`,
+                status: 'running',
+                detail: `${att.name} (${formatFileBytes(loaded)} / ${formatFileBytes(total)})`,
+              });
+              emitUpdate(false);
+            });
+
+            if (res.receiptId || res.filePath || res.url) {
+              uploadedEntries.push({
+                receiptId: res.receiptId,
+                filePath: res.filePath,
+                url: res.url,
+                att,
+              });
+            } else {
+              lastUploadDiagnostic = res.diagnostic || '上传失败';
+              const isImage = att.mimeType.startsWith('image/');
+              const approxSize = estimateAttachmentBytes(att);
+              // Fail fast on fatal errors (e.g. HTTP 413 / 403 / timeout) OR for non-image binary files / large images (>2MB)
+              // instead of silently attempting doomed inline JSON base64 submission
+              if (res.fatal || !isImage || approxSize > 2 * 1024 * 1024) {
+                toolStepsMap.set('relay-upload', {
+                  id: 'relay-upload',
+                  name: `${mediaLabel}上传失败`,
+                  status: 'error',
+                  detail: `${att.name} · ${att.size}`,
+                  output: lastUploadDiagnostic,
+                });
+                emitUpdate(false);
+                throw new Error(`上传附件「${att.name}」(${att.size}) 失败：${lastUploadDiagnostic}`);
+              }
             }
+          }
+
+          const allUploaded = uploadedEntries.length === mediaAttachments.length;
+          // Only materialize inline base64 when small images fell back to inline submission
+          if (!allUploaded && effectiveAttachments) {
+            effectiveAttachments = await Promise.all(
+              effectiveAttachments.map(async (att) => {
+                if (att.textContent || att.base64Data) return att;
+                const b64 = await resolveAttachmentBase64(att);
+                return b64 ? { ...att, base64Data: b64 } : att;
+              })
+            );
           }
 
           toolStepsMap.set('relay-upload', {
             id: 'relay-upload',
-            name:
-              uploadedReceipts.length === mediaAttachments.length
-                ? '图片上传完成'
-                : '切换内联图像发送',
+            name: allUploaded ? `${mediaLabel}上传完成` : `切换内联${mediaLabel}直传`,
             status: 'done',
-            output:
-              uploadedReceipts.length === mediaAttachments.length
-                ? `已暂存 ${uploadedReceipts.length} 个附件，等待模型识图`
-                : lastUploadDiagnostic || '已附带压缩图像直传',
+            output: allUploaded
+              ? `已上传 ${uploadedEntries.length} 个附件至云端，正在交给 Agent 处理`
+              : lastUploadDiagnostic || '已切换为消息内联传输',
           });
           emitUpdate(false);
         }
@@ -1762,7 +2372,7 @@ export function streamDshMuxReply(
                 } catch {
                   // ignore serialization error
                 }
-                const events = extractFollowEvents(item);
+                const events = extractFollowEvents(item, config.serverUrl, sessionId);
                 for (const info of events) {
                   if (info.isSnapshot) continue;
                   if (!sawPostPromptEvent) continue;
@@ -1770,6 +2380,9 @@ export function streamDshMuxReply(
                   if (info.error) {
                     fail(new Error(`Agent 执行出错：${info.error}`));
                     return;
+                  }
+                  if (info.attachments && appendReceivedAttachments(info.attachments)) {
+                    emitUpdate(false);
                   }
                   if (info.reasoningDelta) {
                     accumulatedThinking += info.reasoningDelta;
@@ -1793,7 +2406,10 @@ export function streamDshMuxReply(
                     accumulated = info.fullText;
                     emitUpdate(Boolean(info.done));
                   }
-                  if (info.done || (info.idleSignal && accumulated.length > 0)) {
+                  if (
+                    info.done ||
+                    (info.idleSignal && (accumulated.length > 0 || receivedAttachments.length > 0))
+                  ) {
                     emitUpdate(true);
                     succeed();
                     return;
@@ -1801,13 +2417,13 @@ export function streamDshMuxReply(
                 }
               },
               onEnd: () => {
-                if (!settled && accumulated) {
+                if (!settled && (accumulated || receivedAttachments.length > 0)) {
                   emitUpdate(true);
                   succeed();
                 }
               },
               onError: (errMsg) => {
-                if (!settled && !accumulated) {
+                if (!settled && !accumulated && receivedAttachments.length === 0) {
                   fail(new Error(`订阅会话流 (session/follow) 失败：${errMsg}`));
                 }
               },
@@ -1820,20 +2436,23 @@ export function streamDshMuxReply(
 
             const contentCandidates = buildMultimodalContentCandidates(
               prompt,
-              options?.attachments,
-              uploadedReceipts
+              effectiveAttachments,
+              uploadedEntries
             );
             let promptRes: unknown;
             let lastPromptError: Error | null = null;
 
             for (let idx = 0; idx < contentCandidates.length; idx++) {
-              const candidateContent = contentCandidates[idx];
+              const candidate = contentCandidates[idx];
               const reqBody: Record<string, unknown> = {
                 requestId: idx === 0 ? requestId : mintStreamId(),
                 sessionId,
                 mode: 'queue',
-                content: candidateContent,
+                content: candidate.content,
                 clientTimeZone,
+                ...(candidate.submittedAttachments
+                  ? { submittedAttachments: candidate.submittedAttachments }
+                  : {}),
               };
 
               try {
@@ -1842,7 +2461,7 @@ export function streamDshMuxReply(
                   promptEndpoint,
                   { request: reqBody },
                   signal,
-                  hasMedia ? 40000 : 25000
+                  hasMedia ? 45000 : 25000
                 );
                 lastPromptError = null;
                 break;
@@ -1851,7 +2470,7 @@ export function streamDshMuxReply(
                 const msg = promptErr instanceof Error ? promptErr.message : String(promptErr);
                 lastPromptError = new Error(msg);
 
-                // Do NOT waste time retrying 6 inline base64 formats on network timeout or 413
+                // Do NOT waste time retrying inline payloads on network timeout or 413
                 if (msg.includes('超时') || msg.includes('413') || msg.includes('524') || msg.includes('504')) {
                   break;
                 }
@@ -1861,7 +2480,10 @@ export function streamDshMuxReply(
                   msg.includes('invalid_value') ||
                   msg.includes('invalid_union') ||
                   msg.includes('invalid_type') ||
-                  msg.toLowerCase().includes('content');
+                  msg.includes('unrecognized_keys') ||
+                  msg.toLowerCase().includes('content') ||
+                  msg.toLowerCase().includes('submittedattachments') ||
+                  msg.toLowerCase().includes('unsupported');
 
                 if (isBoundaryError && idx < contentCandidates.length - 1) {
                   continue;
@@ -1875,7 +2497,7 @@ export function streamDshMuxReply(
                     promptEndpoint,
                     { request: withoutMode },
                     signal,
-                    hasMedia ? 40000 : 25000
+                    hasMedia ? 45000 : 25000
                   );
                   lastPromptError = null;
                   break;
@@ -1907,23 +2529,25 @@ export function streamDshMuxReply(
             }
 
             if (lastPromptError) {
-              const uploadHint = lastUploadDiagnostic ? `（${lastUploadDiagnostic}）` : '';
+              const uploadHint = lastUploadDiagnostic ? `（上传详情：${lastUploadDiagnostic}）` : '';
               throw new Error(`提交消息 (${promptEndpoint}) 失败：${lastPromptError.message}${uploadHint}`);
             }
 
             // Fresh inference window after prompt is confirmed accepted by server
             resetIdleTimer(hasMedia ? 120000 : 60000);
 
-            // If the unary prompt response itself already contains reply text, render it immediately
+            // If the unary prompt response itself already contains reply text or media, render it immediately
             if (promptRes && typeof promptRes === 'object') {
               const maybeText =
                 extractTextParts((promptRes as Record<string, unknown>).content) ||
                 (typeof (promptRes as Record<string, unknown>).reply === 'string'
                   ? String((promptRes as Record<string, unknown>).reply)
                   : '');
-              if (maybeText && !accumulated) {
-                const { cleanText, cards } = extractRelayCards(maybeText);
-                onChunk({ text: cleanText, cards, done: true });
+              const maybeAtts = extractMediaAttachments(promptRes, config.serverUrl, sessionId);
+              if (maybeAtts.length > 0) appendReceivedAttachments(maybeAtts);
+              if ((maybeText || receivedAttachments.length > 0) && !accumulated) {
+                if (maybeText) accumulated = maybeText;
+                emitUpdate(true);
                 succeed();
               }
             }
@@ -1946,9 +2570,8 @@ export function streamDshMuxReply(
 
         ws.onclose = (ev) => {
           if (!settled && !diagnosingError) {
-            if (accumulated) {
-              const { cleanText, cards } = extractRelayCards(accumulated);
-              onChunk({ text: cleanText, cards, done: true });
+            if (accumulated || receivedAttachments.length > 0) {
+              emitUpdate(true);
               succeed();
             } else {
               fail(

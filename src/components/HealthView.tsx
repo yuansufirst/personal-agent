@@ -2,29 +2,36 @@ import React, { useEffect, useMemo, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import {
   Activity,
-  ArrowUpRight,
-  BellPlus,
-  Brain,
   Check,
-  Coffee,
-  Droplets,
-  Footprints,
   GripVertical,
   Maximize2,
   Minus,
-  Moon,
+  X,
+} from 'lucide-react';
+import type { AgentProfile, HealthConfig, HealthDailyLog } from '../types/relay';
+import { useGridDragReorder } from '../hooks/useGridDragReorder';
+import { MuseAvatarHeader } from './MuseAvatarHeader';
+import {
+  ArrowUpRight,
+  FeedReminderIcon,
+  HealthCaffeineIcon,
+  HealthExerciseIcon,
+  HealthFocusIcon,
+  HealthSleepIcon,
+  HealthStepsIcon,
+  HealthWaterIcon,
   Plus,
   SlidersHorizontal,
   Sun,
-  Watch,
-  X,
-} from 'lucide-react';
-import type { HealthConfig, HealthDailyLog } from '../types/relay';
-import { useGridDragReorder } from '../hooks/useGridDragReorder';
+} from './AppIcons';
 
 interface HealthViewProps {
   healthConfig: HealthConfig;
   todayLog: HealthDailyLog;
+  agentProfile?: AgentProfile;
+  isVoiceActive?: boolean;
+  onOpenDrawer?: () => void;
+  onTapAvatar?: () => void;
   onUpdateConfig: (next: HealthConfig) => void;
   onUpdateTodayLog: (next: HealthDailyLog) => void;
   onScheduleBedtimeReminder: () => void;
@@ -68,12 +75,12 @@ const ALL_TILE_CATALOG: {
   tintVar: string;
   Icon: React.ComponentType<{ className?: string }>;
 }[] = [
-  { id: 'sleep', label: '睡眠', defaultSize: '1x1', accentVar: 'var(--accent-indigo)', tintVar: 'var(--tint-blue)', Icon: Moon },
-  { id: 'exercise', label: '运动', defaultSize: '1x1', accentVar: 'var(--accent-amber)', tintVar: 'var(--tint-red)', Icon: Watch },
-  { id: 'water', label: '饮水', defaultSize: '2x1', accentVar: 'var(--accent-sky)', tintVar: 'var(--tint-cyan)', Icon: Droplets },
-  { id: 'steps', label: '步数', defaultSize: '2x1', accentVar: 'var(--accent-mint)', tintVar: 'var(--tint-emerald)', Icon: Footprints },
-  { id: 'focus', label: '专注', defaultSize: '1x1', accentVar: 'var(--accent-violet)', tintVar: 'var(--tint-violet)', Icon: Brain },
-  { id: 'caffeine', label: '咖啡因', defaultSize: '1x1', accentVar: 'var(--accent-coral)', tintVar: 'var(--tint-amber)', Icon: Coffee },
+  { id: 'sleep', label: '睡眠', defaultSize: '1x1', accentVar: 'var(--accent-indigo)', tintVar: 'var(--tint-blue)', Icon: HealthSleepIcon },
+  { id: 'exercise', label: '运动', defaultSize: '1x1', accentVar: 'var(--accent-amber)', tintVar: 'var(--tint-red)', Icon: HealthExerciseIcon },
+  { id: 'water', label: '饮水', defaultSize: '2x1', accentVar: 'var(--accent-sky)', tintVar: 'var(--tint-cyan)', Icon: HealthWaterIcon },
+  { id: 'steps', label: '步数', defaultSize: '2x1', accentVar: 'var(--accent-mint)', tintVar: 'var(--tint-emerald)', Icon: HealthStepsIcon },
+  { id: 'focus', label: '专注', defaultSize: '1x1', accentVar: 'var(--accent-violet)', tintVar: 'var(--tint-violet)', Icon: HealthFocusIcon },
+  { id: 'caffeine', label: '咖啡因', defaultSize: '1x1', accentVar: 'var(--accent-coral)', tintVar: 'var(--tint-amber)', Icon: HealthCaffeineIcon },
 ];
 
 const TILE_TINT_MAP: Record<TileId, string> = {
@@ -163,6 +170,10 @@ const EXERCISE_LEVEL_META: Record<0 | 1 | 2 | 3, { label: string; minutes: numbe
 export const HealthView: React.FC<HealthViewProps> = ({
   healthConfig,
   todayLog,
+  agentProfile,
+  isVoiceActive = false,
+  onOpenDrawer,
+  onTapAvatar,
   onUpdateConfig,
   onUpdateTodayLog,
   onScheduleBedtimeReminder,
@@ -327,7 +338,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
             }}
             aria-label="切换浮贴尺寸"
             title={`尺寸 ${item.size}`}
-            className="flex h-7 items-center gap-0.5 rounded-lg border border-[var(--relay-tile-border)] bg-black/25 px-1.5 font-mono-tabular text-[10px] text-[var(--relay-text-muted)] hover:text-[var(--relay-text)]"
+            className="flex h-7 items-center gap-0.5 rounded-lg border border-[var(--relay-tile-border)] bg-zinc-100 px-1.5 font-mono-tabular text-[10px] text-[var(--relay-text-muted)] hover:text-[var(--relay-text)] dark:bg-zinc-800"
           >
             <Maximize2 className="h-3 w-3" />
             <span>{item.size}</span>
@@ -340,7 +351,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
                 togglePinTile(item.id);
               }}
               aria-label="撕下浮贴"
-              className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--relay-tile-border)] bg-black/25 text-[var(--accent-coral)]"
+              className="flex h-7 w-7 items-center justify-center rounded-lg border border-[var(--relay-tile-border)] bg-zinc-100 text-[var(--accent-coral)] dark:bg-zinc-800"
             >
               <X className="h-3.5 w-3.5" />
             </button>
@@ -352,7 +363,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
         onPointerDown={(e) => startDrag(item.id, e)}
         aria-label="拖动排序"
         title="按住拖动排序"
-        className="touch-none flex h-7 w-7 cursor-grab items-center justify-center rounded-lg text-[var(--relay-text-faint)] transition-colors hover:bg-white/5 hover:text-[var(--relay-text)] active:cursor-grabbing"
+        className="touch-none flex h-7 w-7 cursor-grab items-center justify-center rounded-lg text-[var(--relay-text-faint)] transition-colors hover:bg-black/[0.05] hover:text-[var(--relay-text)] active:cursor-grabbing dark:hover:bg-white/10"
       >
         <GripVertical className="h-3.5 w-3.5" />
       </button>
@@ -371,7 +382,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
           <div className="flex h-full flex-col justify-between gap-2.5">
             <div className="flex items-center justify-between gap-1">
               <div className="flex items-center gap-1.5">
-                <Watch className="h-4 w-4 text-[var(--accent-amber)]" />
+                <HealthExerciseIcon className="h-4 w-4" />
                 <span className="text-xs font-medium text-[var(--relay-text-muted)]">运动</span>
               </div>
               {renderTileControls(item)}
@@ -428,7 +439,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
                     className={`flex h-7 items-center justify-center rounded-lg text-[11px] font-medium transition-colors ${
                       selected
                         ? 'bg-[var(--accent-amber)]/20 text-[var(--accent-amber)]'
-                        : 'bg-black/15 text-[var(--relay-text-faint)] hover:text-[var(--relay-text-muted)]'
+                        : 'bg-zinc-100 text-[var(--relay-text-faint)] hover:text-[var(--relay-text-muted)] dark:bg-zinc-800/80'
                     }`}
                   >
                     {lvl === 1 ? '轻' : lvl === 2 ? '中' : '强'}
@@ -446,7 +457,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
           <div className="flex h-full flex-col justify-between gap-2.5">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5">
-                <Footprints className="h-4 w-4 text-[var(--accent-mint)]" />
+                <HealthStepsIcon className="h-4 w-4" />
                 <span className="text-xs font-medium text-[var(--relay-text-muted)]">步数</span>
               </div>
               <div className="flex items-center gap-2">
@@ -532,7 +543,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
                     steps: clamp(todayLog.steps + 1000, 0, 100000),
                   })
                 }
-                className="flex h-8 flex-1 items-center justify-center rounded-xl border border-[var(--relay-tile-border)] bg-black/15 font-mono-tabular text-xs font-medium text-[var(--relay-text)] transition-transform active:scale-95"
+                className="flex h-8 flex-1 items-center justify-center rounded-xl border border-[var(--relay-tile-border)] bg-zinc-50 font-mono-tabular text-xs font-medium text-[var(--relay-text)] transition-transform active:scale-95 dark:bg-zinc-800/80"
               >
                 +1k
               </button>
@@ -561,7 +572,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
           <div className="flex h-full flex-col justify-between gap-2">
             <div className="flex items-center justify-between gap-1">
               <div className="flex items-center gap-1.5">
-                <Moon className="h-4 w-4 text-[var(--accent-indigo)]" />
+                <HealthSleepIcon className="h-4 w-4" />
                 <span className="text-xs font-medium text-[var(--relay-text-muted)]">睡眠</span>
               </div>
               {renderTileControls(item)}
@@ -611,7 +622,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
                     sleepHours: clamp(Number((todayLog.sleepHours - 0.5).toFixed(1)), 0, 16),
                   })
                 }
-                className="flex h-8 flex-1 items-center justify-center rounded-xl border border-[var(--relay-tile-border)] bg-black/15 text-[var(--relay-text-muted)] transition-transform active:scale-95 hover:text-[var(--relay-text)]"
+                className="flex h-8 flex-1 items-center justify-center rounded-xl border border-[var(--relay-tile-border)] bg-zinc-50 text-[var(--relay-text-muted)] transition-transform active:scale-95 hover:text-[var(--relay-text)] dark:bg-zinc-800/80"
               >
                 <Minus className="h-3.5 w-3.5" />
               </button>
@@ -639,7 +650,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
           <div className="flex h-full flex-col justify-between gap-2.5">
             <div className="flex items-center justify-between gap-2">
               <div className="flex items-center gap-1.5">
-                <Droplets className="h-4 w-4 text-[var(--accent-sky)]" />
+                <HealthWaterIcon className="h-4 w-4" />
                 <span className="text-xs font-medium text-[var(--relay-text-muted)]">饮水</span>
               </div>
               <div className="flex items-center gap-2">
@@ -697,7 +708,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
           <div className="flex h-full flex-col justify-between gap-2">
             <div className="flex items-center justify-between gap-1">
               <div className="flex items-center gap-1.5">
-                <Brain className="h-4 w-4 text-[var(--accent-violet)]" />
+                <HealthFocusIcon className="h-4 w-4" />
                 <span className="text-xs font-medium text-[var(--relay-text-muted)]">专注</span>
               </div>
               {renderTileControls(item)}
@@ -736,7 +747,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
                     focusMinutes: clamp(p.focusMinutes + 15, 0, 480),
                   }))
                 }
-                className="flex h-8 flex-1 items-center justify-center rounded-xl border border-[var(--relay-tile-border)] bg-black/15 font-mono-tabular text-xs text-[var(--relay-text)] active:scale-95"
+                className="flex h-8 flex-1 items-center justify-center rounded-xl border border-[var(--relay-tile-border)] bg-zinc-50 font-mono-tabular text-xs text-[var(--relay-text)] active:scale-95 dark:bg-zinc-800/80"
               >
                 +15m
               </button>
@@ -762,7 +773,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
           <div className="flex h-full flex-col justify-between gap-2">
             <div className="flex items-center justify-between gap-1">
               <div className="flex items-center gap-1.5">
-                <Coffee className="h-4 w-4 text-[var(--accent-coral)]" />
+                <HealthCaffeineIcon className="h-4 w-4" />
                 <span className="text-xs font-medium text-[var(--relay-text-muted)]">咖啡因</span>
               </div>
               {renderTileControls(item)}
@@ -789,7 +800,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
                         : 'bg-[var(--relay-track)] text-[var(--relay-text-faint)]/60'
                     }`}
                   >
-                    <Coffee className="h-4 w-4" />
+                    <HealthCaffeineIcon className="h-4 w-4" />
                   </motion.button>
                 );
               })}
@@ -805,10 +816,10 @@ export const HealthView: React.FC<HealthViewProps> = ({
   };
 
   const summaryRings = [
-    { key: 'sleep', r: 44, pct: sleepPct, color: 'var(--accent-indigo)', Icon: Moon },
-    { key: 'steps', r: 36, pct: stepsPct, color: 'var(--accent-mint)', Icon: Footprints },
-    { key: 'water', r: 28, pct: waterPct, color: 'var(--accent-sky)', Icon: Droplets },
-    { key: 'exercise', r: 20, pct: exercisePct, color: 'var(--accent-amber)', Icon: Watch },
+    { key: 'sleep', r: 44, pct: sleepPct, color: 'var(--accent-indigo)', Icon: HealthSleepIcon },
+    { key: 'steps', r: 36, pct: stepsPct, color: 'var(--accent-mint)', Icon: HealthStepsIcon },
+    { key: 'water', r: 28, pct: waterPct, color: 'var(--accent-sky)', Icon: HealthWaterIcon },
+    { key: 'exercise', r: 20, pct: exercisePct, color: 'var(--accent-amber)', Icon: HealthExerciseIcon },
   ];
 
   const getSizeClasses = (size: TileSize): string => {
@@ -818,61 +829,60 @@ export const HealthView: React.FC<HealthViewProps> = ({
   };
 
   return (
-    <div className="mx-auto w-full max-w-5xl px-4 py-5 pb-28 sm:px-6 lg:py-8 lg:pb-14 space-y-6">
-      {/* FLUSH BOARD HEADER (Inherent chrome — sits directly on the dark board, NOT a tile) */}
+    <div className="mx-auto w-full max-w-5xl px-4 pt-3 pb-28 sm:px-6 lg:pt-7 lg:pb-14 space-y-5">
+      {/* Shared Muse Header — tapping circular AI avatar starts in-place voice */}
+      <MuseAvatarHeader
+        agentProfile={agentProfile}
+        isVoiceActive={isVoiceActive}
+        onOpenDrawer={onOpenDrawer}
+        onTapAvatar={onTapAvatar}
+      />
+
+      {/* Compact Date & Symbol Controls Row */}
       <div className="flex items-center justify-between gap-3">
-        <div className="flex items-baseline gap-2.5 min-w-0">
-          <h1 className="text-xl font-semibold tracking-tight text-[var(--relay-text)]">健康</h1>
-          <span className="font-mono-tabular text-xs text-[var(--relay-text-muted)]">
-            {shortDateLabel}
-          </span>
-        </div>
+        <span className="font-mono-tabular text-xs font-medium text-[var(--relay-text-muted)]">
+          {shortDateLabel}
+        </span>
 
         <div className="flex items-center gap-1.5">
           <button
             type="button"
             onClick={() => setShowTilePicker(true)}
-            aria-label="管理或贴上浮贴"
-            title="浮贴管理"
-            className={`flex h-10 items-center gap-1.5 rounded-xl border px-3 text-xs font-medium transition-colors ${
+            aria-label="浮贴管理"
+            className={`flex h-9 w-9 items-center justify-center rounded-full border transition-colors ${
               managingBoard
                 ? 'border-[var(--accent-indigo)]/60 bg-[var(--accent-indigo)]/15 text-[var(--accent-indigo)]'
-                : 'border-[var(--relay-tile-border)] text-[var(--relay-text-muted)] hover:text-[var(--relay-text)]'
+                : 'border-[var(--relay-tile-border)] bg-white text-[var(--relay-text-muted)] hover:text-[var(--relay-text)] dark:bg-zinc-900'
             }`}
           >
-            <Plus className="h-4 w-4" />
-            <span className="hidden sm:inline">浮贴</span>
+            <Plus weight="bold" className="h-4 w-4" />
           </button>
 
           <button
             type="button"
             onClick={() => setShowGoalSheet(true)}
-            aria-label="设定目标"
-            title="每日目标"
-            className="flex h-10 w-10 items-center justify-center rounded-xl border border-[var(--relay-tile-border)] text-[var(--relay-text-muted)] transition-colors hover:text-[var(--relay-text)]"
+            aria-label="目标设置"
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--relay-tile-border)] bg-white text-zinc-800 transition-colors hover:bg-zinc-50 dark:bg-zinc-900 dark:text-zinc-200"
           >
-            <SlidersHorizontal className="h-4 w-4" />
+            <SlidersHorizontal weight="regular" className="h-4 w-4" />
           </button>
 
           <button
             type="button"
             onClick={onScheduleBedtimeReminder}
-            aria-label="生成就寝提醒"
-            title={`就寝提醒 ${healthConfig.bedtimeTarget}`}
-            className="flex h-10 w-10 items-center justify-center rounded-xl border border-[var(--relay-tile-border)] text-[var(--relay-text-muted)] transition-colors hover:text-[var(--accent-indigo)]"
+            aria-label="就寝提醒"
+            className="flex h-9 w-9 items-center justify-center rounded-full border border-[var(--relay-tile-border)] bg-white text-zinc-800 transition-colors hover:bg-zinc-50 dark:bg-zinc-900 dark:text-zinc-200"
           >
-            <BellPlus className="h-4 w-4" />
+            <FeedReminderIcon className="h-4 w-4" />
           </button>
 
           <button
             type="button"
             onClick={onAskAgentHealthCheck}
             aria-label="同步给助理"
-            title="交给助理"
-            className="flex h-10 items-center gap-1 rounded-xl bg-[var(--accent-indigo)]/16 px-3 text-xs font-semibold text-[var(--accent-indigo)] transition-transform active:scale-95"
+            className="flex h-9 w-9 items-center justify-center rounded-full bg-zinc-950 text-white transition-transform active:scale-95 dark:bg-zinc-100 dark:text-zinc-950"
           >
-            <span>助理</span>
-            <ArrowUpRight className="h-3.5 w-3.5" />
+            <ArrowUpRight weight="bold" className="h-4 w-4" />
           </button>
         </div>
       </div>
@@ -931,11 +941,11 @@ export const HealthView: React.FC<HealthViewProps> = ({
 
           <div className="hidden space-y-2 sm:block">
             <div className="flex items-center gap-1.5 font-mono-tabular text-xs text-[var(--relay-text)]">
-              <Moon className="h-3.5 w-3.5 text-[var(--accent-indigo)]" />
+              <HealthSleepIcon className="h-3.5 w-3.5" />
               <span>{healthConfig.bedtimeTarget}</span>
             </div>
             <div className="flex items-center gap-1.5 font-mono-tabular text-xs text-[var(--relay-text)]">
-              <Sun className="h-3.5 w-3.5 text-[var(--accent-amber)]" />
+              <Sun weight="regular" className="h-3.5 w-3.5 text-zinc-700 dark:text-zinc-200" />
               <span>{healthConfig.wakeTarget}</span>
             </div>
           </div>
@@ -1006,13 +1016,11 @@ export const HealthView: React.FC<HealthViewProps> = ({
             exit={{ opacity: 0, height: 0 }}
             className="flex items-center justify-between rounded-2xl border border-[var(--accent-indigo)]/35 bg-[var(--accent-indigo)]/10 px-3.5 py-2 text-xs"
           >
-            <span className="text-[var(--relay-text)]">
-              按住右上角把手拖动排序 · 点尺寸切 1×1 / 2×1 / 2×2
-            </span>
+            <span className="text-[var(--relay-text)]">拖动排序 · 切换尺寸</span>
             <button
               type="button"
               onClick={() => setManagingBoard(false)}
-              className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-[var(--accent-indigo)] px-2.5 py-1 text-[11px] font-semibold text-[#111318]"
+              className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-[var(--accent-indigo)] px-2.5 py-1 text-[11px] font-semibold text-white"
             >
               <Check className="h-3 w-3" />
               <span>完成</span>
@@ -1111,7 +1119,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
                       className={`flex flex-col items-center justify-center gap-2 rounded-2xl border p-3.5 transition-all active:scale-95 ${
                         pinned
                           ? 'border-[var(--accent-indigo)]/55 bg-[var(--accent-indigo)]/12'
-                          : 'border-[var(--relay-tile-border)] bg-black/15 opacity-70 hover:opacity-100'
+                          : 'border-[var(--relay-tile-border)] bg-zinc-50 opacity-75 hover:opacity-100 dark:bg-zinc-900'
                       }`}
                     >
                       <span style={{ color: accentVar }}>
@@ -1239,7 +1247,7 @@ export const HealthView: React.FC<HealthViewProps> = ({
               <button
                 type="button"
                 onClick={() => setShowGoalSheet(false)}
-                className="flex h-11 w-full items-center justify-center rounded-2xl bg-[var(--accent-indigo)] text-xs font-semibold text-[#111318] transition-transform active:scale-[0.98]"
+                className="flex h-11 w-full items-center justify-center rounded-2xl bg-[var(--accent-indigo)] text-xs font-semibold text-white transition-transform active:scale-[0.98]"
               >
                 完成
               </button>
