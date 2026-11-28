@@ -6,6 +6,7 @@ import {defineConfig} from 'vite';
 import {VitePWA} from 'vite-plugin-pwa';
 
 const APP_BASE = process.env.VITE_BASE || '/';
+const IS_CAPACITOR_BUILD = process.env.CAPACITOR_BUILD === '1';
 
 export default defineConfig(() => {
   return {
@@ -13,10 +14,12 @@ export default defineConfig(() => {
     plugins: [
       react(),
       tailwindcss(),
-      VitePWA({
-        registerType: 'autoUpdate',
-        includeAssets: ['icon.svg', 'apple-touch-icon.png'],
-        manifest: {
+      ...(!IS_CAPACITOR_BUILD
+        ? [
+            VitePWA({
+              registerType: 'autoUpdate',
+              includeAssets: ['icon.svg', 'apple-touch-icon.png'],
+              manifest: {
           id: APP_BASE,
           name: 'Relay — 私人 Agent 交互中枢',
           short_name: 'Relay',
@@ -88,7 +91,9 @@ export default defineConfig(() => {
           enabled: false,
           type: 'module',
         },
-      }),
+            }),
+          ]
+        : []),
       // Copies src/assets into dist/ so root-relative URLs like
       // "/src/assets/images/..." (e.g. generate_image output) still resolve
       // in production builds. Do not remove.

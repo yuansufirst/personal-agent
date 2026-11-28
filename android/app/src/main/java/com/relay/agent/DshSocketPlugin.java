@@ -1,6 +1,7 @@
 package com.relay.agent;
 
 import android.graphics.Color;
+import android.os.Build;
 import android.util.Base64;
 import android.view.View;
 import android.view.Window;
@@ -47,20 +48,36 @@ public class DshSocketPlugin extends Plugin {
     @Override
     public void load() {
         super.load();
-        wsClient = new OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(0, TimeUnit.MILLISECONDS)
-            .writeTimeout(45, TimeUnit.SECONDS)
-            .pingInterval(25, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
-            .build();
-        httpClient = new OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(35, TimeUnit.SECONDS)
-            .writeTimeout(35, TimeUnit.SECONDS)
-            .callTimeout(45, TimeUnit.SECONDS)
-            .retryOnConnectionFailure(true)
-            .build();
+        ensureClients();
+    }
+
+    private synchronized void ensureClients() {
+        if (wsClient == null) {
+            try {
+                wsClient = new OkHttpClient.Builder()
+                    .connectTimeout(15, TimeUnit.SECONDS)
+                    .readTimeout(0, TimeUnit.MILLISECONDS)
+                    .writeTimeout(45, TimeUnit.SECONDS)
+                    .pingInterval(25, TimeUnit.SECONDS)
+                    .retryOnConnectionFailure(true)
+                    .build();
+            } catch (Throwable ignored) {
+                // will retry lazily on first network call
+            }
+        }
+        if (httpClient == null) {
+            try {
+                httpClient = new OkHttpClient.Builder()
+                    .connectTimeout(15, TimeUnit.SECONDS)
+                    .readTimeout(35, TimeUnit.SECONDS)
+                    .writeTimeout(35, TimeUnit.SECONDS)
+                    .callTimeout(45, TimeUnit.SECONDS)
+                    .retryOnConnectionFailure(true)
+                    .build();
+            } catch (Throwable ignored) {
+                // will retry lazily on first network call
+            }
+        }
     }
 
     @PluginMethod
@@ -79,6 +96,11 @@ public class DshSocketPlugin extends Plugin {
             reqBuilder.header("Origin", origin);
         }
 
+        ensureClients();
+        if (wsClient == null) {
+            call.reject("Network client unavailable");
+            return;
+        }
         WebSocket ws = wsClient.newWebSocket(reqBuilder.build(), new WebSocketListener() {
             @Override
             public void onOpen(@NonNull WebSocket webSocket, @NonNull Response response) {
@@ -240,6 +262,11 @@ public class DshSocketPlugin extends Plugin {
             reqBuilder.header("Origin", origin);
         }
 
+        ensureClients();
+        if (httpClient == null) {
+            call.reject("HTTP client unavailable");
+            return;
+        }
         OkHttpClient uploadClient = httpClient.newBuilder()
             .writeTimeout(timeoutMs, TimeUnit.MILLISECONDS)
             .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
@@ -313,6 +340,11 @@ public class DshSocketPlugin extends Plugin {
             reqBuilder.method(upperMethod, reqBody);
         }
 
+        ensureClients();
+        if (httpClient == null) {
+            call.reject("HTTP client unavailable");
+            return;
+        }
         OkHttpClient callClient = httpClient.newBuilder()
             .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
             .writeTimeout(timeoutMs, TimeUnit.MILLISECONDS)
@@ -361,6 +393,11 @@ public class DshSocketPlugin extends Plugin {
             reqBuilder.header("Origin", origin);
         }
 
+        ensureClients();
+        if (httpClient == null) {
+            call.reject("HTTP client unavailable");
+            return;
+        }
         OkHttpClient callClient = httpClient.newBuilder()
             .readTimeout(timeoutMs, TimeUnit.MILLISECONDS)
             .callTimeout(timeoutMs + 10000L, TimeUnit.MILLISECONDS)
@@ -414,8 +451,9 @@ public class DshSocketPlugin extends Plugin {
      * with light/dark mode on Android 10–15 edge-to-edge windows.
      */
     @PluginMethod
+    @SuppressWarnings("deprecation")
     public void setWindowBackground(PluginCall call) {
-        String colorHex = call.getString("color", "#F8F7F4");
+        String colorHex = call.getString("color", "#F6F7F9");
         boolean dark = Boolean.TRUE.equals(call.getBoolean("dark", false));
         if (getActivity() == null) {
             call.resolve();
@@ -423,23 +461,28 @@ public class DshSocketPlugin extends Plugin {
         }
         getActivity().runOnUiThread(() -> {
             try {
-                int parsed = Color.parseColor(colorHex != null ? colorHex : "#F8F7F4");
+                int parsed = Color.parseColor(colorHex != null ? colorHex : "#F6F7F9");
                 View contentView = getActivity().findViewById(android.R.id.content);
                 if (contentView != null) {
                     contentView.setBackgroundColor(parsed);
                 }
                 Window window = getActivity().getWindow();
                 if (window != null) {
-                    window.setStatusBarColor(parsed);
-                    window.setNavigationBarColor(parsed);
-                    WindowInsetsControllerCompat controller =
-                        WindowCompat.getInsetsController(window, window.getDecorView());
-                    if (controller != null) {
-                        controller.setAppearanceLightStatusBars(!dark);
-                        controller.setAppearanceLightNavigationBars(!dark);
+                    if (Build.VERSION.SDK_INT < 35) {
+                        window.setStatusBarColor(parsed);
+                        window.setNavigationBarColor(parsed);
+                    }
+                    View decorView = window.getDecorView();
+                    if (decorView != null) {
+                        WindowInsetsControllerCompat controller =
+                            WindowCompat.getInsetsController(window, decorView);
+                        if (controller != null) {
+                            controller.setAppearanceLightStatusBars(!dark);
+                            controller.setAppearanceLightNavigationBars(!dark);
+                        }
                     }
                 }
-            } catch (Exception ignored) {
+            } catch (Throwable ignored) {
                 // ignore invalid color or unsupported API
             }
             call.resolve();

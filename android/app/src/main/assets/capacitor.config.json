@@ -6,22 +6,15 @@
 		"androidScheme": "https"
 	},
 	"android": {
-		"backgroundColor": "#F8F7F4",
+		"backgroundColor": "#F6F7F9",
 		"allowMixedContent": true,
-		"webContentsDebuggingEnabled": true
+		"webContentsDebuggingEnabled": true,
+		"adjustMarginsForEdgeToEdge": "disable",
+		"resolveServiceWorkerRequests": false
 	},
 	"plugins": {
 		"CapacitorHttp": {
 			"enabled": true
-		},
-		"Keyboard": {
-			"resize": "body",
-			"resizeOnFullScreen": true
-		},
-		"StatusBar": {
-			"overlaysWebView": false,
-			"style": "LIGHT",
-			"backgroundColor": "#F8F7F4"
 		}
 	}
 }
