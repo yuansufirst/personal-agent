@@ -1,11 +1,6 @@
-import { Capacitor, registerPlugin } from '@capacitor/core';
+import { Capacitor } from '@capacitor/core';
 import { App as CapacitorApp } from '@capacitor/app';
-
-interface DshWindowBridge {
-  setWindowBackground(options: { color: string; dark: boolean }): Promise<void>;
-}
-
-const DshWindow = registerPlugin<DshWindowBridge>('DshSocket');
+import { setNativeWindowBackground } from './nativeSocket';
 
 export function isNativeApp(): boolean {
   return Capacitor.isNativePlatform();
@@ -15,9 +10,7 @@ export async function syncNativeStatusBar(darkMode: boolean): Promise<void> {
   if (!Capacitor.isNativePlatform()) return;
   const color = darkMode ? '#0E1014' : '#F6F7F9';
   try {
-    if (Capacitor.isPluginAvailable('DshSocket')) {
-      await DshWindow.setWindowBackground({ color, dark: darkMode });
-    }
+    await setNativeWindowBackground(color, darkMode);
   } catch {
     // Ignore if native window bridge is unavailable
   }

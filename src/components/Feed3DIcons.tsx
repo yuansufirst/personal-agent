@@ -1,5 +1,9 @@
 import React, { useState } from 'react';
-import { Bell, BookOpen, Compass, Newspaper, PushPin } from '@phosphor-icons/react';
+import { Bell } from '@phosphor-icons/react/dist/csr/Bell';
+import { BookOpen } from '@phosphor-icons/react/dist/csr/BookOpen';
+import { Compass } from '@phosphor-icons/react/dist/csr/Compass';
+import { Newspaper } from '@phosphor-icons/react/dist/csr/Newspaper';
+import { PushPin } from '@phosphor-icons/react/dist/csr/PushPin';
 import paper3dUrl from '../assets/images/feed_icon_paper_1795867366696.jpg';
 import reminder3dUrl from '../assets/images/feed_icon_reminder_1795867368055.jpg';
 import dispatch3dUrl from '../assets/images/feed_icon_dispatch_1795867368132.jpg';

@@ -494,7 +494,7 @@ export default function App() {
 
   const handleRefreshSessions = useCallback(
     async (silent = false) => {
-      if (config.mode !== 'dsh-bridge') return;
+      if (config.mode !== 'dsh-bridge' || !/^https?:\/\/.+/i.test(config.serverUrl.trim())) return;
       setIsLoadingSessions(true);
       try {
         const remoteList = await listDshSessions(config);

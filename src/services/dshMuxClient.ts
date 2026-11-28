@@ -200,6 +200,9 @@ async function callDshHttpUnary(
   timeoutMs = 25000
 ): Promise<unknown> {
   const base = config.serverUrl.trim().replace(/\/+$/, '');
+  if (!/^https?:\/\/.+/i.test(base)) {
+    throw new Error('未配置有效的云端 Agent 地址（请在设置中填写 https:// 开头的域名）');
+  }
   const cleanEndpoint = endpoint.replace(/^\/+/, '');
   const cachedPrefix = unaryPrefixCache.get(base);
   const candidatePrefixes = cachedPrefix
@@ -1219,6 +1222,9 @@ function collectSessionSummaries(node: unknown, out: Map<string, RemoteSessionSu
  * Tries HTTP unary `session/list` first, then falls back to WS `workspace/follow` initial snapshot.
  */
 export async function listDshSessions(config: ConnectionConfig): Promise<RemoteSessionSummary[]> {
+  if (!/^https?:\/\/.+/i.test(config.serverUrl.trim())) {
+    return [];
+  }
   const workspaceId = config.workspace.trim() || undefined;
   const found = new Map<string, RemoteSessionSummary>();
 

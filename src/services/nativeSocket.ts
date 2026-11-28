@@ -4,6 +4,7 @@ interface DshSocketPlugin {
   connect(options: { id: string; url: string; origin?: string }): Promise<void>;
   send(options: { id: string; data: string }): Promise<void>;
   close(options: { id: string; code?: number; reason?: string }): Promise<void>;
+  setWindowBackground(options: { color: string; dark: boolean }): Promise<void>;
   uploadBinary(options: {
     url: string;
     base64Data: string;
@@ -196,6 +197,15 @@ export function isNativeDshSocketAvailable(): boolean {
   return Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('DshSocket');
 }
 
+export async function setNativeWindowBackground(color: string, dark: boolean): Promise<void> {
+  if (!isNativeDshSocketAvailable()) return;
+  await DshSocket.setWindowBackground({ color, dark });
+}
+
+function isValidHttpUrl(rawUrl: string): boolean {
+  return /^https?:\/\/.+/i.test((rawUrl || '').trim());
+}
+
 /**
  * Uses OkHttp native upload in the Android APK (bypassing CapacitorHttp Blob quirks and CORS),
  * or returns null on web so caller uses standard XHR/fetch.
@@ -209,7 +219,7 @@ export async function uploadBinaryNativeIfAvailable(options: {
   mode: 'raw' | 'multipart';
   timeoutMs?: number;
 }): Promise<{ status: number; ok: boolean; body: string } | null> {
-  if (!isNativeDshSocketAvailable()) {
+  if (!isNativeDshSocketAvailable() || !isValidHttpUrl(options.url)) {
     return null;
   }
   return DshSocket.uploadBinary({
@@ -232,6 +242,9 @@ export async function httpRequestNativeIfAvailable(options: {
 }): Promise<{ status: number; ok: boolean; body: string; contentType?: string } | null> {
   if (!Capacitor.isNativePlatform() || !Capacitor.isPluginAvailable('DshSocket')) {
     return null;
+  }
+  if (!isValidHttpUrl(options.url)) {
+    throw new Error('未配置有效的服务端地址（需以 https:// 或 http:// 开头）');
   }
   try {
     return await DshSocket.httpRequest({
@@ -264,6 +277,9 @@ export async function downloadBinaryNativeIfAvailable(options: {
   base64Data: string;
 } | null> {
   if (!Capacitor.isNativePlatform() || !Capacitor.isPluginAvailable('DshSocket')) {
+    return null;
+  }
+  if (!isValidHttpUrl(options.url)) {
     return null;
   }
   try {

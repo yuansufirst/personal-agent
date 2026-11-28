@@ -1,57 +1,55 @@
 import React from 'react';
-import {
-  Alarm,
-  Archive,
-  ArrowDown,
-  ArrowUp,
-  ArrowUpRight,
-  ArrowsClockwise,
-  Article,
-  Bell,
-  BookmarkSimple,
-  BookOpenText,
-  Brain,
-  CalendarBlank,
-  ChatCircleDots,
-  ChatTeardropDots,
-  CheckCircle,
-  ClipboardText,
-  Clock,
-  CloudCheck,
-  Coffee,
-  Coins,
-  Compass,
-  DeviceMobile,
-  Drop,
-  FileText,
-  FolderOpen,
-  Footprints,
-  GearSix,
-  HardDrives,
-  Heart,
-  Heartbeat,
-  Image as PhImage,
-  Laptop,
-  Lightning,
-  List,
-  MapPinArea,
-  Microphone,
-  MoonStars,
-  NewspaperClipping,
-  PaperPlaneTilt,
-  Plus,
-  Shapes,
-  SlidersHorizontal,
-  SneakerMove,
-  Sparkle,
-  SquaresFour,
-  Star,
-  Stop,
-  Sun,
-  Target,
-  TerminalWindow,
-  Trash,
-} from '@phosphor-icons/react';
+import { Alarm } from '@phosphor-icons/react/dist/csr/Alarm';
+import { Archive } from '@phosphor-icons/react/dist/csr/Archive';
+import { ArrowDown } from '@phosphor-icons/react/dist/csr/ArrowDown';
+import { ArrowUp } from '@phosphor-icons/react/dist/csr/ArrowUp';
+import { ArrowUpRight } from '@phosphor-icons/react/dist/csr/ArrowUpRight';
+import { ArrowsClockwise } from '@phosphor-icons/react/dist/csr/ArrowsClockwise';
+import { Article } from '@phosphor-icons/react/dist/csr/Article';
+import { Bell } from '@phosphor-icons/react/dist/csr/Bell';
+import { BookmarkSimple } from '@phosphor-icons/react/dist/csr/BookmarkSimple';
+import { BookOpenText } from '@phosphor-icons/react/dist/csr/BookOpenText';
+import { Brain } from '@phosphor-icons/react/dist/csr/Brain';
+import { CalendarBlank } from '@phosphor-icons/react/dist/csr/CalendarBlank';
+import { ChatCircleDots } from '@phosphor-icons/react/dist/csr/ChatCircleDots';
+import { ChatTeardropDots } from '@phosphor-icons/react/dist/csr/ChatTeardropDots';
+import { CheckCircle } from '@phosphor-icons/react/dist/csr/CheckCircle';
+import { ClipboardText } from '@phosphor-icons/react/dist/csr/ClipboardText';
+import { Clock } from '@phosphor-icons/react/dist/csr/Clock';
+import { CloudCheck } from '@phosphor-icons/react/dist/csr/CloudCheck';
+import { Coffee } from '@phosphor-icons/react/dist/csr/Coffee';
+import { Coins } from '@phosphor-icons/react/dist/csr/Coins';
+import { Compass } from '@phosphor-icons/react/dist/csr/Compass';
+import { DeviceMobile } from '@phosphor-icons/react/dist/csr/DeviceMobile';
+import { Drop } from '@phosphor-icons/react/dist/csr/Drop';
+import { FileText } from '@phosphor-icons/react/dist/csr/FileText';
+import { FolderOpen } from '@phosphor-icons/react/dist/csr/FolderOpen';
+import { Footprints } from '@phosphor-icons/react/dist/csr/Footprints';
+import { GearSix } from '@phosphor-icons/react/dist/csr/GearSix';
+import { HardDrives } from '@phosphor-icons/react/dist/csr/HardDrives';
+import { Heart } from '@phosphor-icons/react/dist/csr/Heart';
+import { Heartbeat } from '@phosphor-icons/react/dist/csr/Heartbeat';
+import { Image as PhImage } from '@phosphor-icons/react/dist/csr/Image';
+import { Laptop } from '@phosphor-icons/react/dist/csr/Laptop';
+import { Lightning } from '@phosphor-icons/react/dist/csr/Lightning';
+import { List } from '@phosphor-icons/react/dist/csr/List';
+import { MapPinArea } from '@phosphor-icons/react/dist/csr/MapPinArea';
+import { Microphone } from '@phosphor-icons/react/dist/csr/Microphone';
+import { MoonStars } from '@phosphor-icons/react/dist/csr/MoonStars';
+import { NewspaperClipping } from '@phosphor-icons/react/dist/csr/NewspaperClipping';
+import { PaperPlaneTilt } from '@phosphor-icons/react/dist/csr/PaperPlaneTilt';
+import { Plus } from '@phosphor-icons/react/dist/csr/Plus';
+import { Shapes } from '@phosphor-icons/react/dist/csr/Shapes';
+import { SlidersHorizontal } from '@phosphor-icons/react/dist/csr/SlidersHorizontal';
+import { SneakerMove } from '@phosphor-icons/react/dist/csr/SneakerMove';
+import { Sparkle } from '@phosphor-icons/react/dist/csr/Sparkle';
+import { SquaresFour } from '@phosphor-icons/react/dist/csr/SquaresFour';
+import { Star } from '@phosphor-icons/react/dist/csr/Star';
+import { Stop } from '@phosphor-icons/react/dist/csr/Stop';
+import { Sun } from '@phosphor-icons/react/dist/csr/Sun';
+import { Target } from '@phosphor-icons/react/dist/csr/Target';
+import { TerminalWindow } from '@phosphor-icons/react/dist/csr/TerminalWindow';
+import { Trash } from '@phosphor-icons/react/dist/csr/Trash';
 
 export interface AppIconProps {
   className?: string;
